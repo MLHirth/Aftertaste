@@ -2,8 +2,6 @@
 
 Aftertaste is a local-first macOS desktop utility that learns your own listening behavior and writes a private daily playlist back to Spotify.
 
-This build follows the plan in `ProjectPlan.txt` and keeps Spotify credentials external so you can provide them later.
-
 ## What is implemented
 
 - Tauri + React + TypeScript desktop UI (`app-ui/`)
