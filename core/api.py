@@ -150,6 +150,8 @@ def _cloud_principal_optional(
 def _dashboard_for_cloud_user(user_id: str) -> dict[str, Any]:
     engine = service().cloud_sync_engine_for_user(user_id)
     db = engine.db
+    spotify_status = service().cloud_spotify_status(user_id)
+    now_playing = service().cloud_spotify_now_playing(user_id)
 
     likely_skips = db.query_one(
         """
@@ -198,13 +200,13 @@ def _dashboard_for_cloud_user(user_id: str) -> dict[str, Any]:
     ) + timedelta(days=1)
 
     return {
-        "now_playing": None,
+        "now_playing": now_playing,
         "likely_skip_count_today": int((likely_skips or {"c": 0})["c"]),
         "completions_today": int((completions or {"c": 0})["c"]),
         "top_negative_artists": top_negative_artists,
         "top_revived_tracks": top_revived_tracks,
         "next_playlist_refresh_time": next_refresh.isoformat(),
-        "poller_running": False,
+        "poller_running": bool(spotify_status.get("poller_running")),
         "cloud_sync_enabled": True,
     }
 

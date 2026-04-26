@@ -41,6 +41,7 @@ type CloudSpotifyState = {
   authorized: boolean
   has_refresh_token: boolean
   access_token_expires_at: string | null
+  poller_running: boolean
   server_master_enabled: boolean
   server_master_interval_seconds: number
 }
@@ -228,6 +229,11 @@ export function Dashboard() {
             {cloudSpotify?.connected
               ? `Connected${cloudSpotify?.access_token_expires_at ? `, token refresh active` : ''}`
               : 'Not connected'}
+            {cloudSpotify?.connected
+              ? cloudSpotify.poller_running
+                ? ', playback monitor running'
+                : ', playback monitor idle'
+              : ''}
             {cloudSpotify?.server_master_enabled
               ? `, server auto-run every ${cloudSpotify.server_master_interval_seconds}s`
               : ', server auto-run is disabled'}
@@ -373,7 +379,9 @@ export function Dashboard() {
           <p className="muted">
             {isDesktopApp()
               ? 'No active playback detected.'
-              : 'Live playback is only available in desktop mode. Web shows synced memory data.'}
+              : cloudSpotify?.connected
+                ? 'No active playback detected from server-linked Spotify right now.'
+                : 'Connect Spotify on Server to enable live playback and autonomous updates in web mode.'}
           </p>
         )}
       </section>

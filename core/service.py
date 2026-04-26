@@ -63,6 +63,7 @@ class AftertasteService:
         self._cloud_pkce_owner: dict[str, str] = {}
         self._cloud_token_stores: dict[str, InMemoryTokenStore] = {}
         self._cloud_spotify_clients: dict[str, SpotifyClient] = {}
+        self._cloud_pollers: dict[str, PlaybackPoller] = {}
         self._automation_stop = threading.Event()
         self._automation_thread: threading.Thread | None = None
 
@@ -200,8 +201,25 @@ class AftertasteService:
             self._cloud_spotify_clients[normalized_user] = client
             return client
 
+    def _cloud_poller_for_user(self, user_id: str) -> PlaybackPoller:
+        normalized_user = user_id.strip()
+        if not normalized_user:
+            raise RuntimeError("Cloud sync user id cannot be empty.")
+
+        with self._tenant_lock:
+            existing = self._cloud_pollers.get(normalized_user)
+            if existing is not None:
+                return existing
+
+            tenant_db = self.cloud_sync_engine_for_user(normalized_user).db
+            spotify = self._cloud_spotify_client_for_user(normalized_user)
+            poller = PlaybackPoller(db=tenant_db, client=spotify)
+            self._cloud_pollers[normalized_user] = poller
+            return poller
+
     def cloud_spotify_status(self, user_id: str) -> dict[str, Any]:
         client = self._cloud_spotify_client_for_user(user_id)
+        poller = self._cloud_poller_for_user(user_id)
         expires_at = (
             client.access_token_expires_at.isoformat()
             if client.access_token_expires_at
@@ -212,9 +230,32 @@ class AftertasteService:
             "authorized": client.is_authorized(),
             "has_refresh_token": bool(client.refresh_token),
             "access_token_expires_at": expires_at,
+            "poller_running": poller.running,
             "server_master_enabled": self.settings.server_master_enabled,
             "server_master_interval_seconds": self.settings.server_master_interval_seconds,
         }
+
+    def cloud_spotify_now_playing(self, user_id: str) -> dict[str, Any] | None:
+        client = self._cloud_spotify_client_for_user(user_id)
+        if not client.is_authorized():
+            return None
+        try:
+            payload = client.get_currently_playing() or {}
+            item = payload.get("item") or {}
+            if not item.get("id"):
+                return None
+            return {
+                "track_id": item.get("id"),
+                "name": item.get("name"),
+                "artists": ", ".join(
+                    artist.get("name", "") for artist in item.get("artists") or []
+                ),
+                "is_playing": bool(payload.get("is_playing")),
+                "progress_ms": payload.get("progress_ms") or 0,
+                "duration_ms": item.get("duration_ms") or 0,
+            }
+        except Exception:
+            return None
 
     def cloud_spotify_start_auth(self, user_id: str) -> dict[str, str]:
         if not self.settings.spotify_client_id:
@@ -253,6 +294,8 @@ class AftertasteService:
 
         client = self._cloud_spotify_client_for_user(user_id)
         token_payload = client.exchange_code(code=code, code_verifier=verifier)
+        poller = self._cloud_poller_for_user(user_id)
+        poller.start()
         return {
             "authorized": True,
             "token_type": token_payload.get("token_type"),
@@ -265,10 +308,13 @@ class AftertasteService:
         tenant_engine = self.cloud_sync_engine_for_user(user_id)
         tenant_db = tenant_engine.db
         spotify = self._cloud_spotify_client_for_user(user_id)
+        poller = self._cloud_poller_for_user(user_id)
         if not spotify.is_authorized():
             raise RuntimeError(
                 "Cloud Spotify is not connected for this account. Connect Spotify in web mode first."
             )
+        if not poller.running:
+            poller.start()
 
         sync_summary: dict[str, int] = {}
         sync_summary.update(sync_saved_tracks(tenant_db, spotify))
@@ -304,6 +350,9 @@ class AftertasteService:
             user_ids = list(self._cloud_spotify_clients.keys())
             for user_id in user_ids:
                 try:
+                    poller = self._cloud_poller_for_user(user_id)
+                    if not poller.running:
+                        poller.start()
                     self.run_cloud_master_once(user_id)
                 except Exception:
                     continue
@@ -1536,6 +1585,9 @@ class AftertasteService:
             self._automation_thread.join(timeout=3)
         self.poller.stop()
         with self._tenant_lock:
+            for poller in self._cloud_pollers.values():
+                poller.stop()
+            self._cloud_pollers.clear()
             for tenant_db in self._tenant_dbs.values():
                 tenant_db.close()
             self._tenant_dbs.clear()

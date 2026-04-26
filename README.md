@@ -141,6 +141,8 @@ If you want the hosted server to keep playlists updated even when desktop is clo
 
 Then in web Dashboard, use `Connect Spotify on Server` once per server process.
 
+When connected, hosted web mode can show current playback from server-side Spotify auth and keep play-event memory growing even with desktop closed.
+
 Important security note: server-side Spotify refresh tokens are stored in process memory only (not persisted to disk). After server restart, reconnect Spotify in web mode.
 
 ## Deploy on server (Docker)
