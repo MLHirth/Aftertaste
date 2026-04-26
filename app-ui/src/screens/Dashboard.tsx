@@ -1,7 +1,14 @@
 import { useEffect, useState } from 'react'
 
 import { isClerkEnabled } from '../auth/clerk'
-import { cloudSyncStatus, syncCloudNow } from '../api/client'
+import {
+  cloudSpotifyAuthExchange,
+  cloudSpotifyAuthStart,
+  cloudSpotifyStatus,
+  cloudSyncStatus,
+  runCloudSpotifyAutomationNow,
+  syncCloudNow,
+} from '../api/client'
 import { useAuthStore } from '../state/authStore'
 import { usePlaybackStore } from '../state/playbackStore'
 
@@ -28,17 +35,70 @@ function explainCloudError(message: string) {
   return message
 }
 
+type CloudSpotifyState = {
+  user_id: string
+  connected: boolean
+  authorized: boolean
+  has_refresh_token: boolean
+  access_token_expires_at: string | null
+  server_master_enabled: boolean
+  server_master_interval_seconds: number
+}
+
+const CLOUD_SPOTIFY_SESSION_KEY = 'aftertaste.cloudSpotifySessionId'
+
 export function Dashboard() {
   const [callbackText, setCallbackText] = useState('')
   const [displayProgressMs, setDisplayProgressMs] = useState(0)
   const [displayTrackId, setDisplayTrackId] = useState<string | null>(null)
   const [cloudNote, setCloudNote] = useState<string | null>(null)
+  const [cloudSpotify, setCloudSpotify] = useState<CloudSpotifyState | null>(null)
+  const [cloudSpotifyLoading, setCloudSpotifyLoading] = useState(false)
   const auth = useAuthStore()
   const playback = usePlaybackStore()
 
   useEffect(() => {
     void auth.refreshStatus()
     void playback.refreshDashboard()
+
+    if (!isDesktopApp() && isClerkEnabled()) {
+      setCloudSpotifyLoading(true)
+      void cloudSpotifyStatus()
+        .then((statusPayload) => {
+          setCloudSpotify(statusPayload)
+        })
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : 'Cloud Spotify status failed.'
+          setCloudNote(explainCloudError(message))
+        })
+        .finally(() => setCloudSpotifyLoading(false))
+    }
+
+    if (!isDesktopApp()) {
+      const params = new URLSearchParams(window.location.search)
+      const code = params.get('code')
+      const state = params.get('state')
+      const sessionId = window.sessionStorage.getItem(CLOUD_SPOTIFY_SESSION_KEY)
+      if (code && state && sessionId) {
+        setCloudSpotifyLoading(true)
+        void cloudSpotifyAuthExchange(sessionId, state, code)
+          .then(() => cloudSpotifyStatus())
+          .then((statusPayload) => {
+            setCloudSpotify(statusPayload)
+            setCloudNote('Server Spotify connected. Automation can now run from the hosted server.')
+          })
+          .catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : 'Cloud Spotify connect failed.'
+            setCloudNote(explainCloudError(message))
+          })
+          .finally(() => {
+            window.sessionStorage.removeItem(CLOUD_SPOTIFY_SESSION_KEY)
+            setCloudSpotifyLoading(false)
+            const clean = `${window.location.origin}${window.location.pathname}${window.location.hash}`
+            window.history.replaceState({}, document.title, clean)
+          })
+      }
+    }
 
     const dashboardInterval = window.setInterval(() => {
       void playback.refreshDashboard()
@@ -110,8 +170,9 @@ export function Dashboard() {
                       setCloudNote('Cloud sync is not configured on this client yet.')
                       return
                     }
+                    const pushedEvents = result.pushed_by_table?.play_events ?? 0
                     setCloudNote(
-                      `Cloud sync: pushed ${result.pushed}, pulled ${result.pulled}, applied ${result.applied}`,
+                      `Cloud sync: pushed ${result.pushed} (play events ${pushedEvents}), pulled ${result.pulled}, applied ${result.applied}`,
                     )
                   })
                   .catch((error: unknown) => {
@@ -154,6 +215,69 @@ export function Dashboard() {
       </section>
 
       {cloudNote && <p className="muted">{cloudNote}</p>}
+
+      {!isDesktopApp() && isClerkEnabled() && (
+        <section className="panel">
+          <h3>Server Spotify Automation</h3>
+          <p>
+            Connect Spotify once in web mode so the hosted server can keep playlists updated
+            even while your desktop app is closed.
+          </p>
+          <p className="muted">
+            Status:{' '}
+            {cloudSpotify?.connected
+              ? `Connected${cloudSpotify?.access_token_expires_at ? `, token refresh active` : ''}`
+              : 'Not connected'}
+            {cloudSpotify?.server_master_enabled
+              ? `, server auto-run every ${cloudSpotify.server_master_interval_seconds}s`
+              : ', server auto-run is disabled'}
+          </p>
+          <div className="row-actions">
+            <button
+              onClick={() => {
+                setCloudSpotifyLoading(true)
+                void cloudSpotifyAuthStart()
+                  .then((payload) => {
+                    window.sessionStorage.setItem(CLOUD_SPOTIFY_SESSION_KEY, payload.session_id)
+                    window.location.href = payload.authorize_url
+                  })
+                  .catch((error: unknown) => {
+                    const message = error instanceof Error ? error.message : 'Cloud Spotify start failed.'
+                    setCloudNote(explainCloudError(message))
+                    setCloudSpotifyLoading(false)
+                  })
+              }}
+              disabled={cloudSpotifyLoading}
+            >
+              {cloudSpotifyLoading ? 'Starting...' : 'Connect Spotify on Server'}
+            </button>
+            <button
+              className="button-secondary"
+              onClick={() => {
+                setCloudSpotifyLoading(true)
+                void runCloudSpotifyAutomationNow()
+                  .then((result) => {
+                    setCloudNote(
+                      `Server automation run: selected ${result.generated.selected_count}, playlists updated.`
+                    )
+                    return cloudSpotifyStatus()
+                  })
+                  .then((statusPayload) => {
+                    setCloudSpotify(statusPayload)
+                  })
+                  .catch((error: unknown) => {
+                    const message = error instanceof Error ? error.message : 'Server automation failed.'
+                    setCloudNote(explainCloudError(message))
+                  })
+                  .finally(() => setCloudSpotifyLoading(false))
+              }}
+              disabled={cloudSpotifyLoading || !cloudSpotify?.connected}
+            >
+              Run Server Automation Now
+            </button>
+          </div>
+        </section>
+      )}
 
       {status && !status.has_client_id && (
         <section className="panel warning">
@@ -214,7 +338,7 @@ export function Dashboard() {
         </section>
       )}
 
-      {status?.authorized && (
+      {(status?.authorized || (!isDesktopApp() && Boolean(dash))) && (
         <section className="stats-grid">
           <article className="stat-card">
             <span>Likely skips today</span>
@@ -246,7 +370,11 @@ export function Dashboard() {
             <span>{pct(displayProgressMs, dash.now_playing.duration_ms)}%</span>
           </div>
         ) : (
-          <p className="muted">No active playback detected.</p>
+          <p className="muted">
+            {isDesktopApp()
+              ? 'No active playback detected.'
+              : 'Live playback is only available in desktop mode. Web shows synced memory data.'}
+          </p>
         )}
       </section>
 

@@ -219,12 +219,13 @@ export function AccountControl() {
 
 function SessionStatusNoClerk() {
   const status = useAuthStore((state) => state.status)
+  const spotifyLabel = isTauriDesktop()
+    ? `Spotify: ${status?.authorized ? 'connected' : 'not connected'}`
+    : 'Spotify: desktop only'
 
   return (
     <div className="session-chip">
-      <span className={status?.authorized ? 'ok' : ''}>
-        Spotify: {status?.authorized ? 'connected' : 'not connected'}
-      </span>
+      <span className={status?.authorized ? 'ok' : ''}>{spotifyLabel}</span>
       <span>Cloud: Clerk disabled</span>
     </div>
   )
@@ -235,6 +236,9 @@ function SessionStatusWithClerk() {
   const status = useAuthStore((state) => state.status)
   const hasCloudBearerToken = useAuthStore((state) => state.hasCloudBearerToken)
   const cloudIdentity = useAuthStore((state) => state.cloudIdentity)
+  const spotifyLabel = isTauriDesktop()
+    ? `Spotify: ${status?.authorized ? 'connected' : 'not connected'}`
+    : 'Spotify: desktop only'
 
   let cloudLabel = 'Cloud: not connected'
   if (isSignedIn) {
@@ -245,9 +249,7 @@ function SessionStatusWithClerk() {
 
   return (
     <div className="session-chip">
-      <span className={status?.authorized ? 'ok' : ''}>
-        Spotify: {status?.authorized ? 'connected' : 'not connected'}
-      </span>
+      <span className={status?.authorized ? 'ok' : ''}>{spotifyLabel}</span>
       <span className={isSignedIn || hasCloudBearerToken ? 'ok' : ''}>{cloudLabel}</span>
     </div>
   )

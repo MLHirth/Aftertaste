@@ -18,9 +18,29 @@ export function setAuthTokenProvider(provider: TokenProvider) {
   authTokenProvider = provider
 }
 
+function isLocalApiBase() {
+  try {
+    const url = new URL(API_BASE)
+    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '0.0.0.0'
+  } catch {
+    return API_BASE.includes('127.0.0.1') || API_BASE.includes('localhost')
+  }
+}
+
+function shouldAttachAuth(path: string) {
+  if (!isLocalApiBase()) {
+    return true
+  }
+  return (
+    path.startsWith('/sync/cloud-') ||
+    path.startsWith('/cloud/sync/') ||
+    path.startsWith('/cloud/spotify/')
+  )
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const dynamicHeaders: Record<string, string> = {}
-  if (authTokenProvider) {
+  if (authTokenProvider && shouldAttachAuth(path)) {
     try {
       const token = await authTokenProvider()
       if (token) {
@@ -93,6 +113,7 @@ export function syncCloudNow() {
   return request<{
     enabled: boolean
     pushed: number
+    pushed_by_table?: Record<string, number>
     pulled: number
     applied: number
     skipped: number
@@ -110,6 +131,47 @@ export function cloudSyncStatus() {
     checkpoint?: { last_pushed_seq: number; last_pulled_seq: number }
     error?: string
   }>('/sync/cloud-status')
+}
+
+export function cloudSpotifyStatus() {
+  return request<{
+    user_id: string
+    connected: boolean
+    authorized: boolean
+    has_refresh_token: boolean
+    access_token_expires_at: string | null
+    server_master_enabled: boolean
+    server_master_interval_seconds: number
+  }>('/cloud/spotify/status')
+}
+
+export function cloudSpotifyAuthStart() {
+  return request<{ session_id: string; authorize_url: string }>('/cloud/spotify/auth/start', {
+    method: 'POST',
+  })
+}
+
+export function cloudSpotifyAuthExchange(sessionId: string, state: string, code: string) {
+  return request<{ authorized: boolean; expires_in?: number }>('/cloud/spotify/auth/exchange', {
+    method: 'POST',
+    body: JSON.stringify({
+      session_id: sessionId,
+      state,
+      code,
+    }),
+  })
+}
+
+export function runCloudSpotifyAutomationNow() {
+  return request<{
+    ok: boolean
+    user_id: string
+    sync: Record<string, number>
+    generated: { candidate_count: number; selected_count: number }
+    playlists: Record<string, string>
+  }>('/cloud/spotify/automation/run', {
+    method: 'POST',
+  })
 }
 
 export function generateToday(writeToSpotify: boolean) {

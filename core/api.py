@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,12 @@ class CloudPullBody(BaseModel):
     limit: int = Field(default=500, ge=1, le=2000)
 
 
+class CloudSpotifyExchangeBody(BaseModel):
+    session_id: str
+    state: str
+    code: str
+
+
 def service() -> AftertasteService:
     return app.state.service
 
@@ -130,6 +137,121 @@ def _cloud_principal(
     credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
 ) -> CloudPrincipal:
     return _authenticate_cloud_credentials(credentials)
+
+
+def _cloud_principal_optional(
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+) -> CloudPrincipal | None:
+    if credentials is None:
+        return None
+    return _authenticate_cloud_credentials(credentials)
+
+
+def _dashboard_for_cloud_user(user_id: str) -> dict[str, Any]:
+    engine = service().cloud_sync_engine_for_user(user_id)
+    db = engine.db
+
+    likely_skips = db.query_one(
+        """
+      SELECT COUNT(*) AS c
+      FROM play_events
+      WHERE ended_reason = 'skip_early'
+        AND date(started_at) = date('now')
+      """
+    )
+    completions = db.query_one(
+        """
+      SELECT COUNT(*) AS c
+      FROM play_events
+      WHERE ended_reason = 'completed'
+        AND date(started_at) = date('now')
+      """
+    )
+
+    top_negative_artists = db.query_all(
+        """
+      SELECT a.artist_id, a.name, COUNT(*) AS skip_count
+      FROM play_events pe
+      JOIN track_artists ta ON ta.track_id = pe.track_id
+      JOIN artists a ON a.artist_id = ta.artist_id
+      WHERE pe.ended_reason = 'skip_early'
+        AND pe.started_at >= datetime('now', '-7 day')
+      GROUP BY a.artist_id, a.name
+      ORDER BY skip_count DESC
+      LIMIT 5
+      """
+    )
+
+    top_revived_tracks = db.query_all(
+        """
+      SELECT t.track_id, t.name, s.score_revival
+      FROM track_scores s
+      JOIN tracks t ON t.track_id = s.track_id
+      WHERE s.score_revival > 1.5
+      ORDER BY s.score_revival DESC, s.score_total DESC
+      LIMIT 5
+      """
+    )
+
+    next_refresh = datetime.now(tz=timezone.utc).replace(
+        hour=8, minute=0, second=0, microsecond=0
+    ) + timedelta(days=1)
+
+    return {
+        "now_playing": None,
+        "likely_skip_count_today": int((likely_skips or {"c": 0})["c"]),
+        "completions_today": int((completions or {"c": 0})["c"]),
+        "top_negative_artists": top_negative_artists,
+        "top_revived_tracks": top_revived_tracks,
+        "next_playlist_refresh_time": next_refresh.isoformat(),
+        "poller_running": False,
+        "cloud_sync_enabled": True,
+    }
+
+
+def _memory_negative_artists_for_cloud_user(user_id: str) -> list[dict[str, Any]]:
+    engine = service().cloud_sync_engine_for_user(user_id)
+    db = engine.db
+    return db.query_all(
+        """
+      SELECT
+        a.artist_id,
+        a.name,
+        COUNT(*) AS early_skip_count,
+        MAX(pe.started_at) AS last_skip_at
+      FROM play_events pe
+      JOIN track_artists ta ON ta.track_id = pe.track_id
+      JOIN artists a ON a.artist_id = ta.artist_id
+      WHERE pe.ended_reason = 'skip_early'
+      GROUP BY a.artist_id, a.name
+      ORDER BY early_skip_count DESC
+      LIMIT 50
+      """
+    )
+
+
+def _memory_tracks_for_cloud_user(user_id: str, limit: int) -> list[dict[str, Any]]:
+    engine = service().cloud_sync_engine_for_user(user_id)
+    db = engine.db
+    return db.query_all(
+        """
+      SELECT
+        t.track_id,
+        t.name,
+        REPLACE(GROUP_CONCAT(DISTINCT a.name), ',', ', ') AS artists,
+        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'skip_early' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS early_skips,
+        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'completed' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS completions,
+        MAX(pe.ended_at) AS last_played
+      FROM tracks t
+      LEFT JOIN play_events pe ON pe.track_id = t.track_id
+      LEFT JOIN track_artists ta ON ta.track_id = t.track_id
+      LEFT JOIN artists a ON a.artist_id = ta.artist_id
+      GROUP BY t.track_id, t.name
+      ORDER BY early_skips DESC, completions DESC, last_played DESC
+      LIMIT ?
+      """,
+        (limit,),
+    )
 
 
 @app.get("/health")
@@ -265,7 +387,11 @@ def queue_top_up(body: QueueBody) -> dict[str, int]:
 
 
 @app.get("/dashboard")
-def dashboard() -> dict[str, Any]:
+def dashboard(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, Any]:
+    if principal is not None:
+        return _dashboard_for_cloud_user(principal.user_id)
     return service().dashboard()
 
 
@@ -275,12 +401,21 @@ def today_mix(limit: int = 40) -> list[dict[str, Any]]:
 
 
 @app.get("/memory/negative-artists")
-def memory_negative_artists() -> list[dict[str, Any]]:
+def memory_negative_artists(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> list[dict[str, Any]]:
+    if principal is not None:
+        return _memory_negative_artists_for_cloud_user(principal.user_id)
     return service().memory_negative_artists()
 
 
 @app.get("/memory/tracks")
-def memory_tracks(limit: int = 120) -> list[dict[str, Any]]:
+def memory_tracks(
+    limit: int = 120,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> list[dict[str, Any]]:
+    if principal is not None:
+        return _memory_tracks_for_cloud_user(principal.user_id, limit)
     return service().memory_tracks(limit=limit)
 
 
@@ -307,6 +442,54 @@ def save_source(playlist_id: str, body: SourceBody) -> dict[str, bool]:
         manually_confirmed=body.manually_confirmed,
     )
     return {"ok": True}
+
+
+@app.post("/cloud/spotify/auth/start")
+def cloud_spotify_auth_start(
+    principal: CloudPrincipal = Depends(_cloud_principal),
+) -> dict[str, str]:
+    try:
+        return service().cloud_spotify_start_auth(principal.user_id)
+    except Exception as exc:
+        raise _as_http_error(exc) from exc
+
+
+@app.post("/cloud/spotify/auth/exchange")
+def cloud_spotify_auth_exchange(
+    body: CloudSpotifyExchangeBody,
+    principal: CloudPrincipal = Depends(_cloud_principal),
+) -> dict[str, Any]:
+    try:
+        return service().cloud_spotify_exchange_auth(
+            principal.user_id,
+            session_id=body.session_id,
+            state=body.state,
+            code=body.code,
+        )
+    except Exception as exc:
+        raise _as_http_error(exc) from exc
+
+
+@app.get("/cloud/spotify/status")
+def cloud_spotify_status(
+    principal: CloudPrincipal = Depends(_cloud_principal),
+) -> dict[str, Any]:
+    try:
+        payload = service().cloud_spotify_status(principal.user_id)
+        payload["user_id"] = principal.user_id
+        return payload
+    except Exception as exc:
+        raise _as_http_error(exc) from exc
+
+
+@app.post("/cloud/spotify/automation/run")
+def cloud_spotify_automation_run(
+    principal: CloudPrincipal = Depends(_cloud_principal),
+) -> dict[str, Any]:
+    try:
+        return service().run_cloud_master_once(principal.user_id)
+    except Exception as exc:
+        raise _as_http_error(exc) from exc
 
 
 @app.post("/cloud/sync/push")

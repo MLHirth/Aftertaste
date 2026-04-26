@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -27,6 +28,17 @@ from core.spotify_client import SpotifyClient
 from core.spotify_ingest import upsert_track
 
 
+class InMemoryTokenStore:
+    def __init__(self) -> None:
+        self._refresh_token: str | None = None
+
+    def load_refresh_token(self) -> str | None:
+        return self._refresh_token
+
+    def save_refresh_token(self, token: str) -> None:
+        self._refresh_token = token
+
+
 class AftertasteService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -44,11 +56,26 @@ class AftertasteService:
         self._last_recent_reconcile_at: datetime | None = None
         self._last_cloud_sync_at: datetime | None = None
         self._tenant_lock = threading.RLock()
+        self._context_lock = threading.RLock()
         self._tenant_dbs: dict[str, Database] = {}
         self._tenant_engines: dict[str, CloudSyncEngine] = {}
+        self._cloud_pkce = PKCEManager()
+        self._cloud_pkce_owner: dict[str, str] = {}
+        self._cloud_token_stores: dict[str, InMemoryTokenStore] = {}
+        self._cloud_spotify_clients: dict[str, SpotifyClient] = {}
+        self._automation_stop = threading.Event()
+        self._automation_thread: threading.Thread | None = None
 
         if self.spotify.is_authorized():
             self.poller.start()
+
+        if self.settings.server_master_enabled:
+            self._automation_thread = threading.Thread(
+                target=self._automation_loop,
+                name="aftertaste-server-master",
+                daemon=True,
+            )
+            self._automation_thread.start()
 
     def require_configured(self) -> None:
         if not self.spotify.is_configured():
@@ -64,6 +91,7 @@ class AftertasteService:
             "db_path": str(self.settings.db_path),
             "cloud_sync_enabled": self.cloud_sync_client.is_enabled(),
             "cloud_api_base_url": self.settings.cloud_api_base_url,
+            "server_master_enabled": self.settings.server_master_enabled,
         }
 
     def start_auth(self) -> dict[str, str]:
@@ -148,6 +176,137 @@ class AftertasteService:
             self._tenant_dbs[normalized_user] = tenant_db
             self._tenant_engines[normalized_user] = engine
             return engine
+
+    def _cloud_spotify_client_for_user(self, user_id: str) -> SpotifyClient:
+        normalized_user = user_id.strip()
+        if not normalized_user:
+            raise RuntimeError("Cloud sync user id cannot be empty.")
+
+        with self._tenant_lock:
+            existing = self._cloud_spotify_clients.get(normalized_user)
+            if existing is not None:
+                return existing
+
+            token_store = InMemoryTokenStore()
+            client_settings = replace(
+                self.settings,
+                spotify_redirect_uri=(
+                    self.settings.cloud_spotify_redirect_uri
+                    or self.settings.spotify_redirect_uri
+                ),
+            )
+            client = SpotifyClient(settings=client_settings, token_store=token_store)
+            self._cloud_token_stores[normalized_user] = token_store
+            self._cloud_spotify_clients[normalized_user] = client
+            return client
+
+    def cloud_spotify_status(self, user_id: str) -> dict[str, Any]:
+        client = self._cloud_spotify_client_for_user(user_id)
+        expires_at = (
+            client.access_token_expires_at.isoformat()
+            if client.access_token_expires_at
+            else None
+        )
+        return {
+            "connected": bool(client.refresh_token),
+            "authorized": client.is_authorized(),
+            "has_refresh_token": bool(client.refresh_token),
+            "access_token_expires_at": expires_at,
+            "server_master_enabled": self.settings.server_master_enabled,
+            "server_master_interval_seconds": self.settings.server_master_interval_seconds,
+        }
+
+    def cloud_spotify_start_auth(self, user_id: str) -> dict[str, str]:
+        if not self.settings.spotify_client_id:
+            raise RuntimeError("SPOTIFY_CLIENT_ID is not configured.")
+        redirect_uri = self.settings.cloud_spotify_redirect_uri
+        if not redirect_uri:
+            raise RuntimeError(
+                "AFTERTASTE_CLOUD_SPOTIFY_REDIRECT_URI is not configured."
+            )
+
+        session = self._cloud_pkce.start(
+            client_id=self.settings.spotify_client_id,
+            redirect_uri=redirect_uri,
+        )
+        session_id = session.get("session_id")
+        if session_id:
+            self._cloud_pkce_owner[session_id] = user_id
+        return session
+
+    def cloud_spotify_exchange_auth(
+        self,
+        user_id: str,
+        *,
+        session_id: str,
+        state: str,
+        code: str,
+    ) -> dict[str, Any]:
+        owner = self._cloud_pkce_owner.get(session_id)
+        if owner != user_id:
+            raise RuntimeError(
+                "Cloud Spotify auth session does not belong to this user."
+            )
+
+        verifier = self._cloud_pkce.consume(session_id=session_id, state=state)
+        self._cloud_pkce_owner.pop(session_id, None)
+
+        client = self._cloud_spotify_client_for_user(user_id)
+        token_payload = client.exchange_code(code=code, code_verifier=verifier)
+        return {
+            "authorized": True,
+            "token_type": token_payload.get("token_type"),
+            "scope": token_payload.get("scope"),
+            "expires_in": token_payload.get("expires_in"),
+            "server_master_enabled": self.settings.server_master_enabled,
+        }
+
+    def run_cloud_master_once(self, user_id: str) -> dict[str, Any]:
+        tenant_engine = self.cloud_sync_engine_for_user(user_id)
+        tenant_db = tenant_engine.db
+        spotify = self._cloud_spotify_client_for_user(user_id)
+        if not spotify.is_authorized():
+            raise RuntimeError(
+                "Cloud Spotify is not connected for this account. Connect Spotify in web mode first."
+            )
+
+        sync_summary: dict[str, int] = {}
+        sync_summary.update(sync_saved_tracks(tenant_db, spotify))
+        sync_summary.update(sync_playlists(tenant_db, spotify))
+        sync_summary.update(sync_top_items(tenant_db, spotify))
+        sync_summary.update(reconcile_recent_history(tenant_db, spotify))
+
+        with self._context_lock:
+            original_db = self.db
+            original_spotify = self.spotify
+            try:
+                self.db = tenant_db
+                self.spotify = spotify
+                generated = self.generate_today_mix(write_to_spotify=True)
+            finally:
+                self.db = original_db
+                self.spotify = original_spotify
+
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "sync": sync_summary,
+            "generated": {
+                "candidate_count": int(generated.get("candidate_count") or 0),
+                "selected_count": int(generated.get("selected_count") or 0),
+            },
+            "playlists": generated.get("playlists") or {},
+        }
+
+    def _automation_loop(self) -> None:
+        interval = max(30, self.settings.server_master_interval_seconds)
+        while not self._automation_stop.wait(interval):
+            user_ids = list(self._cloud_spotify_clients.keys())
+            for user_id in user_ids:
+                try:
+                    self.run_cloud_master_once(user_id)
+                except Exception:
+                    continue
 
     def _maybe_sync_cloud(self) -> None:
         if not self.cloud_sync_client.is_enabled():
@@ -1306,8 +1465,8 @@ class AftertasteService:
         t.track_id,
         t.name,
         REPLACE(GROUP_CONCAT(DISTINCT a.name), ',', ', ') AS artists,
-        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'skip_early' THEN pe.event_id END) AS early_skips,
-        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'completed' THEN pe.event_id END) AS completions,
+        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'skip_early' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS early_skips,
+        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'completed' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS completions,
         MAX(pe.ended_at) AS last_played
       FROM tracks t
       LEFT JOIN play_events pe ON pe.track_id = t.track_id
@@ -1372,10 +1531,16 @@ class AftertasteService:
         return {"running": self.poller.running}
 
     def close(self) -> None:
+        self._automation_stop.set()
+        if self._automation_thread is not None:
+            self._automation_thread.join(timeout=3)
         self.poller.stop()
         with self._tenant_lock:
             for tenant_db in self._tenant_dbs.values():
                 tenant_db.close()
             self._tenant_dbs.clear()
             self._tenant_engines.clear()
+            self._cloud_spotify_clients.clear()
+            self._cloud_token_stores.clear()
+            self._cloud_pkce_owner.clear()
         self.db.close()

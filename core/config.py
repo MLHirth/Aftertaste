@@ -25,6 +25,9 @@ class Settings:
     clerk_jwks_url: str | None
     clerk_issuer: str | None
     clerk_audience: str | None
+    cloud_spotify_redirect_uri: str | None
+    server_master_enabled: bool
+    server_master_interval_seconds: int
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -66,4 +69,13 @@ def load_settings() -> Settings:
         clerk_jwks_url=os.getenv("CLERK_JWKS_URL") or None,
         clerk_issuer=os.getenv("CLERK_ISSUER") or None,
         clerk_audience=os.getenv("CLERK_AUDIENCE") or None,
+        cloud_spotify_redirect_uri=os.getenv("AFTERTASTE_CLOUD_SPOTIFY_REDIRECT_URI")
+        or None,
+        server_master_enabled=_as_bool(
+            os.getenv("AFTERTASTE_SERVER_MASTER_ENABLED"), False
+        ),
+        server_master_interval_seconds=max(
+            30,
+            int(os.getenv("AFTERTASTE_SERVER_MASTER_INTERVAL_SECONDS", "180")),
+        ),
     )

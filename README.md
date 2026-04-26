@@ -62,6 +62,8 @@ Desktop sync auth options:
 - preferred: sign in with Clerk in the app UI, then use `Sync Cloud Now` (token forwarded automatically)
 - fallback: set `AFTERTASTE_CLOUD_BEARER_TOKEN` for headless/background sync from local backend
 
+Cloud memory counters now use stable event ids (`event_uid`), so early-skip/completion totals survive sync correctly.
+
 Hosted API auth options for cloud endpoints:
 
 - Clerk JWT validation (`CLERK_AUTH_ENABLED=1` + Clerk envs)
@@ -128,6 +130,18 @@ Backend cloud endpoints verify Clerk JWTs with:
 - `CLERK_JWKS_URL`
 - `CLERK_ISSUER`
 - `CLERK_AUDIENCE` (if your token template uses audience)
+
+## Hosted server master mode
+
+If you want the hosted server to keep playlists updated even when desktop is closed:
+
+- set `AFTERTASTE_SERVER_MASTER_ENABLED=1`
+- set `AFTERTASTE_SERVER_MASTER_INTERVAL_SECONDS` (for example `180`)
+- set `AFTERTASTE_CLOUD_SPOTIFY_REDIRECT_URI` to a hosted callback URL (for example `https://aftertaste.mhirth.com/spotify-cloud-callback`) and add it to Spotify Dashboard redirect URIs
+
+Then in web Dashboard, use `Connect Spotify on Server` once per server process.
+
+Important security note: server-side Spotify refresh tokens are stored in process memory only (not persisted to disk). After server restart, reconnect Spotify in web mode.
 
 ## Deploy on server (Docker)
 

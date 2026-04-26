@@ -5,6 +5,7 @@ export type ConfigStatus = {
   db_path: string
   cloud_sync_enabled?: boolean
   cloud_api_base_url?: string | null
+  server_master_enabled?: boolean
 }
 
 export type DashboardData = {

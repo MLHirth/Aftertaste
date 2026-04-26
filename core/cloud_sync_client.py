@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 import requests
@@ -117,6 +118,13 @@ class CloudSyncClient:
         export = self.sync_engine.export_changes(since_seq=last_pushed, limit=500)
         local_changes = export["changes"]
         local_last_seq = int(export["last_seq"])
+        pushed_by_table: dict[str, int] = dict(
+            sorted(
+                Counter(
+                    str(change.get("table") or "unknown") for change in local_changes
+                ).items()
+            )
+        )
 
         pushed = 0
         if local_changes:
@@ -160,6 +168,7 @@ class CloudSyncClient:
         return {
             "enabled": True,
             "pushed": pushed,
+            "pushed_by_table": pushed_by_table,
             "pulled": len(remote_changes),
             "applied": int(apply_result["applied"]),
             "skipped": int(apply_result["skipped"]),
