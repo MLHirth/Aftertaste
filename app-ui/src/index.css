@@ -150,7 +150,7 @@ nav {
   flex-wrap: wrap;
 }
 
-button {
+.app-shell button:not([class*='cl-']) {
   border: 1px solid transparent;
   border-radius: 10px;
   padding: 0.58rem 0.86rem;
@@ -160,7 +160,7 @@ button {
   cursor: pointer;
 }
 
-button:disabled {
+.app-shell button:not([class*='cl-']):disabled {
   opacity: 0.55;
   cursor: default;
 }
@@ -456,6 +456,47 @@ td {
   display: flex;
   align-items: center;
   gap: 0.45rem;
+}
+
+.cl-rootBox .cl-card,
+.cl-rootBox .cl-userButtonPopoverCard {
+  background: #fff !important;
+  color: var(--ink-1) !important;
+  border: 1px solid var(--line) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.cl-rootBox .cl-formButtonPrimary,
+.cl-rootBox .cl-userButtonPopoverActionButton,
+.cl-rootBox .cl-navbarButton,
+.cl-rootBox .cl-profileSectionPrimaryButton {
+  background: #1f5543 !important;
+  color: #fff !important;
+  border: 1px solid #1a4738 !important;
+}
+
+.cl-rootBox .cl-formButtonPrimary:hover,
+.cl-rootBox .cl-userButtonPopoverActionButton:hover,
+.cl-rootBox .cl-navbarButton:hover,
+.cl-rootBox .cl-profileSectionPrimaryButton:hover {
+  background: #1a4738 !important;
+}
+
+.cl-rootBox .cl-userButtonPopoverActionButtonText,
+.cl-rootBox .cl-userButtonPopoverActionButtonIcon,
+.cl-rootBox .cl-navbarButtonLabel {
+  color: #fff !important;
+}
+
+.cl-rootBox .cl-userPreviewMainIdentifier,
+.cl-rootBox .cl-userPreviewSecondaryIdentifier,
+.cl-rootBox .cl-profileSectionTitle,
+.cl-rootBox .cl-headerTitle,
+.cl-rootBox .cl-headerSubtitle,
+.cl-rootBox .cl-formFieldLabel,
+.cl-rootBox .cl-formFieldInput,
+.cl-rootBox .cl-profileSectionContent {
+  color: var(--ink-1) !important;
 }
 
 @media (max-width: 900px) {

@@ -1,6 +1,7 @@
 import { HashRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
 
 import { AccountControl, AuthGate } from './auth/clerk'
+import { DesktopAuthBridge } from './screens/DesktopAuthBridge'
 import { Dashboard } from './screens/Dashboard'
 import { Memory } from './screens/Memory'
 import { Rules } from './screens/Rules'
@@ -47,6 +48,7 @@ function App() {
             <Route path="/memory" element={<Memory />} />
             <Route path="/rules" element={<Rules />} />
             <Route path="/sources" element={<Sources />} />
+            <Route path="/desktop-auth" element={<DesktopAuthBridge />} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </AuthGate>

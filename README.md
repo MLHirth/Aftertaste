@@ -44,7 +44,9 @@ Required later:
 Optional but useful:
 
 - `SPOTIFY_USER_ID` (playlist creation fallback if user id cannot be inferred)
-- `SPOTIFY_REDIRECT_URI` (default loopback callback)
+- `SPOTIFY_REDIRECT_URI` (default desktop deep-link callback: `aftertaste://callback`)
+
+For desktop OAuth auto-return, add `aftertaste://callback` to Spotify Dashboard redirect URIs.
 
 ## Cloud mode (Phase 1)
 
@@ -86,6 +88,8 @@ Then on server use only `aftertaste/`.
 
 Use `just` to avoid manual setup steps:
 
+- install `just` first (macOS: `brew install just`)
+
 - `just setup` install backend + frontend deps
 - `just api` run backend service
 - `just web` run web UI in browser
@@ -102,6 +106,15 @@ Web mode uses Clerk sign-in when `VITE_CLERK_PUBLISHABLE_KEY` is set at build ti
 
 - local web dev: set `VITE_CLERK_PUBLISHABLE_KEY` in environment before `npm run dev`
 - Docker deploy: set `VITE_CLERK_PUBLISHABLE_KEY` in compose environment so build args include it
+- desktop app sign-in bridge URL uses `VITE_CLOUD_SIGNIN_BASE_URL` (for example `https://aftertaste.mhirth.com`)
+- optional Clerk JWT template name for API auth tokens: `VITE_CLERK_JWT_TEMPLATE`
+
+Desktop Clerk flow:
+
+1. In desktop app, click `Sign In In Browser`.
+2. Browser opens `/#/desktop-auth` on your hosted web app.
+3. Sign in there and click `Open in app`.
+4. App receives a deep link (`aftertaste://clerk-callback`) and stores auth token for cloud sync.
 
 Backend cloud endpoints verify Clerk JWTs with:
 

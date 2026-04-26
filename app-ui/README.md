@@ -13,3 +13,8 @@ The UI expects the local backend service at `http://127.0.0.1:8765` by default.
 In Tauri mode, the desktop shell auto-starts the backend (`python -m core.api`) and shuts it down when the app closes.
 
 If `VITE_CLERK_PUBLISHABLE_KEY` is set, the web UI enables Clerk sign-in and includes Clerk Bearer tokens on API requests.
+
+For desktop browser-based Clerk login handoff, set:
+
+- `VITE_CLOUD_SIGNIN_BASE_URL` (hosted app URL)
+- optional `VITE_CLERK_JWT_TEMPLATE`

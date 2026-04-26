@@ -150,6 +150,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(BackendState::new())
         .setup(|app| {
+            app.handle().plugin(tauri_plugin_deep_link::init())?;
             app.handle().plugin(tauri_plugin_opener::init())?;
 
             if cfg!(debug_assertions) {

@@ -19,6 +19,7 @@ export function Dashboard() {
   const playback = usePlaybackStore()
 
   useEffect(() => {
+    void auth.initDeepLinkListener()
     void auth.refreshStatus()
     void playback.refreshDashboard()
 
@@ -140,7 +141,8 @@ export function Dashboard() {
         <section className="panel auth-panel">
           <h3>Connect Spotify (PKCE)</h3>
           <p>
-            Start login, approve Spotify access, then paste your callback URL.
+            Start login in your browser, approve access, then return to the app.
+            If auto-return is blocked, paste the callback URL manually.
           </p>
           <div className="row-actions">
             <button onClick={() => void auth.beginAuth()} disabled={auth.loading}>
