@@ -5,8 +5,8 @@ import { exchangeAuth, getConfigStatus, setAuthTokenProvider, startAuth } from '
 import type { ConfigStatus } from '../types'
 
 const PENDING_SESSION_KEY = 'aftertaste.pendingAuthSessionId'
-const CLOUD_BEARER_TOKEN_KEY = 'aftertaste.cloudBearerToken'
 let deepLinkListenerReady = false
+let deepLinkListenerPromise: Promise<void> | null = null
 let fallbackCloudToken: string | null = null
 
 function readPendingSession() {
@@ -27,27 +27,10 @@ function writePendingSession(sessionId: string | null) {
   window.localStorage.setItem(PENDING_SESSION_KEY, sessionId)
 }
 
-function readCloudBearerToken() {
-  if (typeof window === 'undefined') {
-    return null
-  }
-  return window.localStorage.getItem(CLOUD_BEARER_TOKEN_KEY)
-}
-
-function writeCloudBearerToken(token: string | null) {
-  if (typeof window === 'undefined') {
-    return
-  }
-  if (!token) {
-    window.localStorage.removeItem(CLOUD_BEARER_TOKEN_KEY)
-    return
-  }
-  window.localStorage.setItem(CLOUD_BEARER_TOKEN_KEY, token)
-}
-
 function applyCloudTokenFallback(token: string | null) {
   fallbackCloudToken = token
   if (!token) {
+    setAuthTokenProvider(null)
     return
   }
   setAuthTokenProvider(async () => fallbackCloudToken)
@@ -57,11 +40,13 @@ type AuthState = {
   status: ConfigStatus | null
   pendingSessionId: string | null
   pendingAuthUrl: string | null
+  hasCloudBearerToken: boolean
   loading: boolean
   error: string | null
   refreshStatus: () => Promise<void>
   beginAuth: () => Promise<void>
   completeAuth: (callbackUrl: string) => Promise<void>
+  acceptClerkHandoff: (input: string) => Promise<void>
   initDeepLinkListener: () => Promise<void>
 }
 
@@ -77,6 +62,16 @@ function parseCallbackUrl(input: string): { code: string; state: string } {
   }
 
   return { code, state }
+}
+
+function parseClerkCallback(input: string): string {
+  const trimmed = input.trim()
+  const url = trimmed.includes('://') ? new URL(trimmed) : new URL(`http://x?${trimmed}`)
+  const token = url.searchParams.get('token')
+  if (!token) {
+    throw new Error('Clerk handoff URL is missing token query parameter.')
+  }
+  return token
 }
 
 async function openAuthUrl(url: string) {
@@ -95,6 +90,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   status: null,
   pendingSessionId: readPendingSession(),
   pendingAuthUrl: null,
+  hasCloudBearerToken: false,
   loading: false,
   error: null,
 
@@ -152,54 +148,74 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
+  acceptClerkHandoff: async (input: string) => {
+    try {
+      const token = parseClerkCallback(input)
+      applyCloudTokenFallback(token)
+      set({ hasCloudBearerToken: true, error: null })
+    } catch (error) {
+      set({
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Failed to apply Clerk browser handoff token.',
+      })
+    }
+  },
+
   initDeepLinkListener: async () => {
     if (deepLinkListenerReady) {
       return
     }
-    deepLinkListenerReady = true
-
-    const existingToken = readCloudBearerToken()
-    if (existingToken) {
-      applyCloudTokenFallback(existingToken)
+    if (deepLinkListenerPromise) {
+      await deepLinkListenerPromise
+      return
     }
 
-    try {
-      const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link')
+    deepLinkListenerPromise = (async () => {
+      try {
+        const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link')
 
-      const handle = async (url: string) => {
-        if (url.startsWith('aftertaste://clerk-callback')) {
-          const parsed = new URL(url)
-          const token = parsed.searchParams.get('token')
-          if (token) {
-            writeCloudBearerToken(token)
-            applyCloudTokenFallback(token)
-            set({ error: null })
+        const handle = async (url: string) => {
+          if (url.startsWith('aftertaste://clerk-callback')) {
+            const parsed = new URL(url)
+            const token = parsed.searchParams.get('token')
+            if (token) {
+              applyCloudTokenFallback(token)
+              set({ hasCloudBearerToken: true, error: null })
+            }
+            return
           }
-          return
+
+          try {
+            parseCallbackUrl(url)
+          } catch {
+            return
+          }
+          await get().completeAuth(url)
         }
 
-        try {
-          parseCallbackUrl(url)
-        } catch {
-          return
+        const current = await getCurrent()
+        if (Array.isArray(current)) {
+          for (const url of current) {
+            void handle(url)
+          }
         }
-        await get().completeAuth(url)
+
+        await onOpenUrl((urls) => {
+          for (const url of urls) {
+            void handle(url)
+          }
+        })
+
+        deepLinkListenerReady = true
+      } catch {
+        deepLinkListenerReady = false
+      } finally {
+        deepLinkListenerPromise = null
       }
+    })()
 
-      const current = await getCurrent()
-      if (Array.isArray(current)) {
-        for (const url of current) {
-          void handle(url)
-        }
-      }
-
-      await onOpenUrl((urls) => {
-        for (const url of urls) {
-          void handle(url)
-        }
-      })
-    } catch {
-      // Web mode or plugin unavailable.
-    }
+    await deepLinkListenerPromise
   },
 }))

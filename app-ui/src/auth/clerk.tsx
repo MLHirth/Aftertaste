@@ -1,17 +1,9 @@
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
-import {
-  ClerkLoaded,
-  ClerkLoading,
-  ClerkProvider,
-  SignIn,
-  SignedIn,
-  SignedOut,
-  UserButton,
-  useAuth,
-} from '@clerk/clerk-react'
+import { ClerkLoaded, ClerkLoading, ClerkProvider, SignIn, SignedIn, UserButton, useAuth } from '@clerk/clerk-react'
 
 import { setAuthTokenProvider } from '../api/client'
+import { useAuthStore } from '../state/authStore'
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined
 const clerkJwtTemplate = import.meta.env.VITE_CLERK_JWT_TEMPLATE as string | undefined
@@ -94,7 +86,9 @@ function ClerkTokenBridge() {
 }
 
 function DesktopSignInOutOfApp() {
+  const auth = useAuthStore()
   const [error, setError] = useState<string | null>(null)
+  const [handoffUrl, setHandoffUrl] = useState('')
   const bridgeUrl = useMemo(() => buildDesktopBridgeUrl(), [])
 
   return (
@@ -129,7 +123,28 @@ function DesktopSignInOutOfApp() {
             <textarea readOnly rows={2} value={bridgeUrl} />
           </label>
         )}
+        <label className="input-group">
+          Fallback: paste desktop handoff URL
+          <textarea
+            rows={2}
+            placeholder="aftertaste://clerk-callback?token=..."
+            value={handoffUrl}
+            onChange={(event) => setHandoffUrl(event.target.value)}
+          />
+        </label>
+        <div className="row-actions">
+          <button
+            className="button-secondary"
+            onClick={() => {
+              void auth.acceptClerkHandoff(handoffUrl)
+            }}
+            disabled={!handoffUrl.trim()}
+          >
+            Apply Browser Handoff
+          </button>
+        </div>
         {error && <p className="muted">{error}</p>}
+        {auth.error && <p className="muted">{auth.error}</p>}
       </section>
     </main>
   )
@@ -150,28 +165,41 @@ export function AuthGate({ children }: { children: ReactNode }) {
         </main>
       </ClerkLoading>
       <ClerkLoaded>
-        <SignedIn>
-          <ClerkTokenBridge />
-          {children}
-        </SignedIn>
-        <SignedOut>
-          {isTauriDesktop() ? (
-            <DesktopSignInOutOfApp />
-          ) : (
-            <main className="screen">
-              <section className="panel auth-panel">
-                <h3>Sign in to Aftertaste Cloud</h3>
-                <SignIn
-                  routing="hash"
-                  fallbackRedirectUrl="/desktop-auth"
-                  forceRedirectUrl="/desktop-auth"
-                />
-              </section>
-            </main>
-          )}
-        </SignedOut>
+        <AuthGateLoaded>{children}</AuthGateLoaded>
       </ClerkLoaded>
     </>
+  )
+}
+
+function AuthGateLoaded({ children }: { children: ReactNode }) {
+  const { isSignedIn } = useAuth()
+  const hasCloudBearerToken = useAuthStore((state) => state.hasCloudBearerToken)
+  const desktopCloudSession = isTauriDesktop() && hasCloudBearerToken
+
+  if (isSignedIn) {
+    return (
+      <>
+        <ClerkTokenBridge />
+        {children}
+      </>
+    )
+  }
+
+  if (desktopCloudSession) {
+    return <>{children}</>
+  }
+
+  if (isTauriDesktop()) {
+    return <DesktopSignInOutOfApp />
+  }
+
+  return (
+    <main className="screen">
+      <section className="panel auth-panel">
+        <h3>Sign in to Aftertaste Cloud</h3>
+        <SignIn routing="hash" fallbackRedirectUrl="/desktop-auth" forceRedirectUrl="/desktop-auth" />
+      </section>
+    </main>
   )
 }
 

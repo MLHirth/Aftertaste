@@ -1,6 +1,8 @@
 import { HashRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
+import { useEffect } from 'react'
 
 import { AccountControl, AuthGate } from './auth/clerk'
+import { useAuthStore } from './state/authStore'
 import { DesktopAuthBridge } from './screens/DesktopAuthBridge'
 import { Dashboard } from './screens/Dashboard'
 import { Memory } from './screens/Memory'
@@ -17,6 +19,12 @@ const links = [
 ]
 
 function App() {
+  const auth = useAuthStore()
+
+  useEffect(() => {
+    void auth.initDeepLinkListener()
+  }, [])
+
   return (
     <HashRouter>
       <div className="app-shell">

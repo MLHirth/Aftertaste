@@ -19,7 +19,6 @@ export function Dashboard() {
   const playback = usePlaybackStore()
 
   useEffect(() => {
-    void auth.initDeepLinkListener()
     void auth.refreshStatus()
     void playback.refreshDashboard()
 
