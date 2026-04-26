@@ -15,19 +15,20 @@ class CloudSyncClient:
 
     def is_enabled(self) -> bool:
         return bool(
-            self.settings.cloud_sync_enabled
-            and self.settings.cloud_api_base_url
-            and self.settings.cloud_bearer_token
+            self.settings.cloud_sync_enabled and self.settings.cloud_api_base_url
         )
 
-    def _headers(self) -> dict[str, str]:
-        token = self.settings.cloud_bearer_token or ""
+    def _headers(self, bearer_token: str) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {bearer_token}",
             "Content-Type": "application/json",
         }
 
-    def sync_once(self, remote_name: str = "default") -> dict[str, Any]:
+    def sync_once(
+        self,
+        remote_name: str = "default",
+        bearer_token_override: str | None = None,
+    ) -> dict[str, Any]:
         if not self.is_enabled():
             return {
                 "enabled": False,
@@ -35,6 +36,19 @@ class CloudSyncClient:
                 "pulled": 0,
                 "applied": 0,
                 "skipped": 0,
+            }
+
+        token = (
+            bearer_token_override or self.settings.cloud_bearer_token or ""
+        ).strip()
+        if not token:
+            return {
+                "enabled": False,
+                "pushed": 0,
+                "pulled": 0,
+                "applied": 0,
+                "skipped": 0,
+                "error": "Missing cloud bearer token for sync.",
             }
 
         base = (self.settings.cloud_api_base_url or "").rstrip("/")
@@ -54,7 +68,7 @@ class CloudSyncClient:
                     "client_id": self.settings.cloud_client_id,
                     "changes": local_changes,
                 },
-                headers=self._headers(),
+                headers=self._headers(token),
                 timeout=30,
             )
             push_response.raise_for_status()
@@ -68,7 +82,7 @@ class CloudSyncClient:
                 "since_seq": last_pulled,
                 "limit": 500,
             },
-            headers=self._headers(),
+            headers=self._headers(token),
             timeout=30,
         )
         pull_response.raise_for_status()

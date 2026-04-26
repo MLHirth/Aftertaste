@@ -39,6 +39,30 @@ class CloudSyncEngine:
         self._columns_cache[table_name] = columns
         return columns
 
+    def bootstrap_snapshot_if_empty(self) -> dict[str, int]:
+        row = self.db.query_one("SELECT COUNT(*) AS c FROM sync_log") or {"c": 0}
+        if int(row.get("c") or 0) > 0:
+            return {"inserted": 0}
+
+        inserted = 0
+        for table_name, key_columns in SYNC_TABLE_KEYS.items():
+            keys_sql = ", ".join(key_columns)
+            rows = self.db.query_all(f"SELECT {keys_sql} FROM {table_name}")
+            payload_rows: list[tuple[Any, ...]] = []
+            for key_row in rows:
+                pk = {key: key_row.get(key) for key in key_columns}
+                pk_json = json.dumps(pk, separators=(",", ":"), sort_keys=True)
+                payload_rows.append((table_name, pk_json, "upsert"))
+
+            if payload_rows:
+                self.db.executemany(
+                    "INSERT INTO sync_log(table_name, pk_json, op) VALUES (?, ?, ?)",
+                    payload_rows,
+                )
+                inserted += len(payload_rows)
+
+        return {"inserted": inserted}
+
     def _where_clause(
         self,
         table_name: str,

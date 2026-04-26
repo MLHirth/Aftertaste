@@ -54,7 +54,11 @@ To enable desktop -> cloud sync from the app instance:
 
 - set `AFTERTASTE_CLOUD_SYNC_ENABLED=1`
 - set `AFTERTASTE_CLOUD_API_BASE_URL` to your hosted API URL
-- set `AFTERTASTE_CLOUD_BEARER_TOKEN` to a valid bearer token for that device flow
+
+Desktop sync auth options:
+
+- preferred: sign in with Clerk in the app UI, then use `Sync Cloud Now` (token forwarded automatically)
+- fallback: set `AFTERTASTE_CLOUD_BEARER_TOKEN` for headless/background sync from local backend
 
 Hosted API auth options for cloud endpoints:
 

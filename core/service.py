@@ -39,6 +39,7 @@ class AftertasteService:
         self.pkce = PKCEManager()
         self.poller = PlaybackPoller(db=self.db, client=self.spotify)
         self.sync_engine = CloudSyncEngine(self.db)
+        self.sync_engine.bootstrap_snapshot_if_empty()
         self.cloud_sync_client = CloudSyncClient(settings, self.sync_engine)
         self._last_recent_reconcile_at: datetime | None = None
         self._last_cloud_sync_at: datetime | None = None
@@ -112,8 +113,13 @@ class AftertasteService:
             results.update(block)
         return results
 
-    def sync_cloud_once(self) -> dict[str, Any]:
-        return self.cloud_sync_client.sync_once(remote_name="default")
+    def sync_cloud_once(
+        self, bearer_token_override: str | None = None
+    ) -> dict[str, Any]:
+        return self.cloud_sync_client.sync_once(
+            remote_name="default",
+            bearer_token_override=bearer_token_override,
+        )
 
     def cloud_sync_engine_for_user(self, user_id: str) -> CloudSyncEngine:
         normalized_user = user_id.strip()
@@ -131,12 +137,15 @@ class AftertasteService:
             tenant_db.migrate(self.migrations_dir)
 
             engine = CloudSyncEngine(tenant_db)
+            engine.bootstrap_snapshot_if_empty()
             self._tenant_dbs[normalized_user] = tenant_db
             self._tenant_engines[normalized_user] = engine
             return engine
 
     def _maybe_sync_cloud(self) -> None:
         if not self.cloud_sync_client.is_enabled():
+            return
+        if not (self.settings.cloud_bearer_token or "").strip():
             return
 
         now = datetime.now(tz=timezone.utc)

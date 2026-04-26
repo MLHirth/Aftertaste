@@ -197,9 +197,12 @@ def sync_all() -> dict[str, int]:
 
 
 @app.post("/sync/cloud-now")
-def sync_cloud_now() -> dict[str, Any]:
+def sync_cloud_now(
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+) -> dict[str, Any]:
     try:
-        return service().sync_cloud_once()
+        token_override = credentials.credentials if credentials is not None else None
+        return service().sync_cloud_once(bearer_token_override=token_override)
     except Exception as exc:
         raise _as_http_error(exc) from exc
 
