@@ -216,3 +216,46 @@ export function AccountControl() {
     </SignedIn>
   )
 }
+
+function SessionStatusNoClerk() {
+  const status = useAuthStore((state) => state.status)
+
+  return (
+    <div className="session-chip">
+      <span className={status?.authorized ? 'ok' : ''}>
+        Spotify: {status?.authorized ? 'connected' : 'not connected'}
+      </span>
+      <span>Cloud: Clerk disabled</span>
+    </div>
+  )
+}
+
+function SessionStatusWithClerk() {
+  const { isSignedIn, userId } = useAuth()
+  const status = useAuthStore((state) => state.status)
+  const hasCloudBearerToken = useAuthStore((state) => state.hasCloudBearerToken)
+  const cloudIdentity = useAuthStore((state) => state.cloudIdentity)
+
+  let cloudLabel = 'Cloud: not connected'
+  if (isSignedIn) {
+    cloudLabel = `Cloud: Clerk ${userId ?? 'signed in'}`
+  } else if (hasCloudBearerToken) {
+    cloudLabel = `Cloud: handoff ${cloudIdentity ?? 'token loaded'}`
+  }
+
+  return (
+    <div className="session-chip">
+      <span className={status?.authorized ? 'ok' : ''}>
+        Spotify: {status?.authorized ? 'connected' : 'not connected'}
+      </span>
+      <span className={isSignedIn || hasCloudBearerToken ? 'ok' : ''}>{cloudLabel}</span>
+    </div>
+  )
+}
+
+export function SessionStatus() {
+  if (!publishableKey) {
+    return <SessionStatusNoClerk />
+  }
+  return <SessionStatusWithClerk />
+}

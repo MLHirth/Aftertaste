@@ -122,7 +122,7 @@ def _cloud_principal(
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(
-            status_code=401, detail="Invalid cloud auth token."
+            status_code=401, detail=f"Invalid cloud auth token: {exc}"
         ) from exc
 
 

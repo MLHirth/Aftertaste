@@ -1,7 +1,7 @@
 import { HashRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { useEffect } from 'react'
 
-import { AccountControl, AuthGate } from './auth/clerk'
+import { AccountControl, AuthGate, SessionStatus } from './auth/clerk'
 import { useAuthStore } from './state/authStore'
 import { DesktopAuthBridge } from './screens/DesktopAuthBridge'
 import { Dashboard } from './screens/Dashboard'
@@ -23,6 +23,7 @@ function App() {
 
   useEffect(() => {
     void auth.initDeepLinkListener()
+    void auth.refreshStatus()
   }, [])
 
   return (
@@ -34,6 +35,7 @@ function App() {
             <h1>Taste Memory Assistant</h1>
           </div>
           <div className="topbar-right">
+            <SessionStatus />
             <nav>
               {links.map((link) => (
                 <NavLink

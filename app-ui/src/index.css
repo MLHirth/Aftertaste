@@ -95,6 +95,25 @@ nav {
   gap: 0.7rem;
 }
 
+.session-chip {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  border: 1px solid rgba(77, 70, 61, 0.25);
+  border-radius: 999px;
+  padding: 0.24rem 0.5rem;
+  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.session-chip span {
+  color: var(--ink-2);
+}
+
+.session-chip .ok {
+  color: #1f5543;
+}
+
 .account-chip {
   border: 1px solid rgba(77, 70, 61, 0.2);
   border-radius: 999px;
@@ -158,6 +177,16 @@ nav {
   color: #fff;
   font: inherit;
   cursor: pointer;
+}
+
+.button-link {
+  display: inline-block;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 0.58rem 0.86rem;
+  background: linear-gradient(120deg, var(--accent), #245744);
+  color: #fff;
+  text-decoration: none;
 }
 
 .app-shell button:not([class*='cl-']):disabled {
@@ -503,6 +532,15 @@ td {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar-right {
+    width: 100%;
+  }
+
+  .session-chip {
+    width: 100%;
+    border-radius: 12px;
   }
 
   .hero-card,

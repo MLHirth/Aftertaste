@@ -41,6 +41,7 @@ type AuthState = {
   pendingSessionId: string | null
   pendingAuthUrl: string | null
   hasCloudBearerToken: boolean
+  cloudIdentity: string | null
   loading: boolean
   error: string | null
   refreshStatus: () => Promise<void>
@@ -74,6 +75,41 @@ function parseClerkCallback(input: string): string {
   return token
 }
 
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split('.')
+  if (parts.length < 2) {
+    return null
+  }
+  try {
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+    const json = atob(padded)
+    const payload = JSON.parse(json) as Record<string, unknown>
+    return payload
+  } catch {
+    return null
+  }
+}
+
+function cloudIdentityFromToken(token: string): string | null {
+  const payload = decodeJwtPayload(token)
+  if (!payload) {
+    return null
+  }
+
+  const email = payload.email
+  if (typeof email === 'string' && email) {
+    return email
+  }
+
+  const sub = payload.sub
+  if (typeof sub === 'string' && sub) {
+    return sub
+  }
+
+  return null
+}
+
 async function openAuthUrl(url: string) {
   try {
     await openUrl(url)
@@ -91,6 +127,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   pendingSessionId: readPendingSession(),
   pendingAuthUrl: null,
   hasCloudBearerToken: false,
+  cloudIdentity: null,
   loading: false,
   error: null,
 
@@ -152,7 +189,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const token = parseClerkCallback(input)
       applyCloudTokenFallback(token)
-      set({ hasCloudBearerToken: true, error: null })
+      set({
+        hasCloudBearerToken: true,
+        cloudIdentity: cloudIdentityFromToken(token),
+        error: null,
+      })
     } catch (error) {
       set({
         error:
@@ -182,7 +223,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             const token = parsed.searchParams.get('token')
             if (token) {
               applyCloudTokenFallback(token)
-              set({ hasCloudBearerToken: true, error: null })
+              set({
+                hasCloudBearerToken: true,
+                cloudIdentity: cloudIdentityFromToken(token),
+                error: null,
+              })
             }
             return
           }

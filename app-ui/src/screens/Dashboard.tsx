@@ -10,6 +10,20 @@ function pct(progressMs: number, durationMs: number) {
   return Math.round((progressMs / durationMs) * 100)
 }
 
+function explainCloudError(message: string) {
+  const normalized = message.toLowerCase()
+  if (normalized.includes('audience')) {
+    return `${message} Check CLERK_AUDIENCE on server and VITE_CLERK_JWT_TEMPLATE in app use the same Clerk JWT template.`
+  }
+  if (normalized.includes('issuer')) {
+    return `${message} Check CLERK_ISSUER matches your Clerk instance issuer URL exactly.`
+  }
+  if (normalized.includes('signature')) {
+    return `${message} Check CLERK_JWKS_URL points to the same Clerk instance that issued the token.`
+  }
+  return message
+}
+
 export function Dashboard() {
   const [callbackText, setCallbackText] = useState('')
   const [displayProgressMs, setDisplayProgressMs] = useState(0)
@@ -97,7 +111,8 @@ export function Dashboard() {
                     )
                   })
                   .catch((error: unknown) => {
-                    setCloudNote(error instanceof Error ? error.message : 'Cloud sync failed.')
+                    const message = error instanceof Error ? error.message : 'Cloud sync failed.'
+                    setCloudNote(explainCloudError(message))
                   })
               }}
             >
@@ -115,7 +130,8 @@ export function Dashboard() {
                     )
                   })
                   .catch((error: unknown) => {
-                    setCloudNote(error instanceof Error ? error.message : 'Cloud status failed.')
+                    const message = error instanceof Error ? error.message : 'Cloud status failed.'
+                    setCloudNote(explainCloudError(message))
                   })
               }}
             >

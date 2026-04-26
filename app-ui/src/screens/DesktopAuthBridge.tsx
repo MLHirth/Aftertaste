@@ -19,6 +19,11 @@ function SignedInBridge() {
           setError('No Clerk token returned for app handoff.')
           return
         }
+        if (!clerkJwtTemplate) {
+          setError(
+            'VITE_CLERK_JWT_TEMPLATE is not set. This token may fail cloud auth if your server expects a specific Clerk JWT template or audience.',
+          )
+        }
         setDeepLink(buildDeepLink(token))
       })
       .catch((reason: unknown) => {
@@ -36,13 +41,9 @@ function SignedInBridge() {
         </p>
         {deepLink && (
           <div className="row-actions">
-            <button
-              onClick={() => {
-                window.location.href = deepLink
-              }}
-            >
+            <a className="button-link" href={deepLink}>
               Open in app
-            </button>
+            </a>
           </div>
         )}
         {deepLink && (
