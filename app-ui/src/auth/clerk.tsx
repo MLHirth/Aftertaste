@@ -221,7 +221,7 @@ function SessionStatusNoClerk() {
   const status = useAuthStore((state) => state.status)
   const spotifyLabel = isTauriDesktop()
     ? `Spotify: ${status?.authorized ? 'connected' : 'not connected'}`
-    : 'Spotify: server-managed'
+    : `Spotify: server-managed ${status?.cloud_spotify_connected ? 'connected' : 'not connected'}`
 
   return (
     <div className="session-chip">
@@ -238,7 +238,7 @@ function SessionStatusWithClerk() {
   const cloudIdentity = useAuthStore((state) => state.cloudIdentity)
   const spotifyLabel = isTauriDesktop()
     ? `Spotify: ${status?.authorized ? 'connected' : 'not connected'}`
-    : 'Spotify: server-managed'
+    : `Spotify: server-managed ${status?.cloud_spotify_connected ? 'connected' : 'not connected'}`
 
   let cloudLabel = 'Cloud: not connected'
   if (isSignedIn) {

@@ -9,7 +9,7 @@ from pathlib import Path
 import random
 import re
 import threading
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from core.auth_pkce import PKCEManager, TokenStore
 from core.candidate_builder import build_candidates, rebuild_transition_edges
@@ -26,6 +26,9 @@ from core.rules import load_rules, update_rules
 from core.scorer import score_candidates
 from core.spotify_client import SpotifyClient
 from core.spotify_ingest import upsert_track
+
+
+T = TypeVar("T")
 
 
 class InMemoryTokenStore:
@@ -64,6 +67,7 @@ class AftertasteService:
         self._cloud_token_stores: dict[str, InMemoryTokenStore] = {}
         self._cloud_spotify_clients: dict[str, SpotifyClient] = {}
         self._cloud_pollers: dict[str, PlaybackPoller] = {}
+        self._cloud_automation_state: dict[str, dict[str, Any]] = {}
         self._automation_stop = threading.Event()
         self._automation_thread: threading.Thread | None = None
 
@@ -217,9 +221,44 @@ class AftertasteService:
             self._cloud_pollers[normalized_user] = poller
             return poller
 
+    def _run_cloud_context(self, user_id: str, operation: Callable[[], T]) -> T:
+        tenant_db = self.cloud_sync_engine_for_user(user_id).db
+        spotify = self._cloud_spotify_client_for_user(user_id)
+        with self._context_lock:
+            original_db = self.db
+            original_spotify = self.spotify
+            try:
+                self.db = tenant_db
+                self.spotify = spotify
+                return operation()
+            finally:
+                self.db = original_db
+                self.spotify = original_spotify
+
+    def _mark_cloud_automation_result(
+        self,
+        user_id: str,
+        *,
+        ok: bool,
+        error: str | None = None,
+    ) -> None:
+        now = datetime.now(tz=timezone.utc).isoformat()
+        state = self._cloud_automation_state.get(user_id) or {
+            "run_count": 0,
+            "last_run_at": None,
+            "last_error": None,
+            "last_ok": False,
+        }
+        state["run_count"] = int(state.get("run_count") or 0) + 1
+        state["last_run_at"] = now
+        state["last_ok"] = ok
+        state["last_error"] = error
+        self._cloud_automation_state[user_id] = state
+
     def cloud_spotify_status(self, user_id: str) -> dict[str, Any]:
         client = self._cloud_spotify_client_for_user(user_id)
         poller = self._cloud_poller_for_user(user_id)
+        automation_state = self._cloud_automation_state.get(user_id) or {}
         expires_at = (
             client.access_token_expires_at.isoformat()
             if client.access_token_expires_at
@@ -233,6 +272,13 @@ class AftertasteService:
             "poller_running": poller.running,
             "server_master_enabled": self.settings.server_master_enabled,
             "server_master_interval_seconds": self.settings.server_master_interval_seconds,
+            "automation_thread_running": bool(
+                self._automation_thread and self._automation_thread.is_alive()
+            ),
+            "automation_run_count": int(automation_state.get("run_count") or 0),
+            "automation_last_run_at": automation_state.get("last_run_at"),
+            "automation_last_ok": bool(automation_state.get("last_ok") or False),
+            "automation_last_error": automation_state.get("last_error"),
         }
 
     def cloud_spotify_now_playing(self, user_id: str) -> dict[str, Any] | None:
@@ -256,6 +302,86 @@ class AftertasteService:
             }
         except Exception:
             return None
+
+    def cloud_dashboard(self, user_id: str) -> dict[str, Any]:
+        payload = self._run_cloud_context(user_id, self.dashboard)
+        payload["poller_running"] = self._cloud_poller_for_user(user_id).running
+        payload["now_playing"] = self.cloud_spotify_now_playing(user_id)
+        return payload
+
+    def cloud_memory_negative_artists(self, user_id: str) -> list[dict[str, Any]]:
+        return self._run_cloud_context(user_id, self.memory_negative_artists)
+
+    def cloud_memory_tracks(
+        self, user_id: str, limit: int = 120
+    ) -> list[dict[str, Any]]:
+        return self._run_cloud_context(user_id, lambda: self.memory_tracks(limit=limit))
+
+    def cloud_get_today_mix(
+        self, user_id: str, limit: int = 40
+    ) -> list[dict[str, Any]]:
+        return self._run_cloud_context(user_id, lambda: self.get_today_mix(limit=limit))
+
+    def cloud_generate_today_mix(
+        self, user_id: str, write_to_spotify: bool = False
+    ) -> dict[str, Any]:
+        return self._run_cloud_context(
+            user_id,
+            lambda: self.generate_today_mix(write_to_spotify=write_to_spotify),
+        )
+
+    def cloud_generate_vibe_revival(
+        self, user_id: str, write_to_spotify: bool = False
+    ) -> dict[str, Any]:
+        return self._run_cloud_context(
+            user_id,
+            lambda: self.generate_vibe_revival(write_to_spotify=write_to_spotify),
+        )
+
+    def cloud_sync_all(self, user_id: str) -> dict[str, int]:
+        return self._run_cloud_context(user_id, self.sync_all)
+
+    def cloud_get_rules(self, user_id: str) -> dict[str, float]:
+        return self._run_cloud_context(user_id, self.get_rules)
+
+    def cloud_save_rules(
+        self, user_id: str, updates: dict[str, float]
+    ) -> dict[str, float]:
+        return self._run_cloud_context(user_id, lambda: self.save_rules(updates))
+
+    def cloud_list_sources(self, user_id: str) -> list[dict[str, Any]]:
+        return self._run_cloud_context(user_id, self.list_sources)
+
+    def cloud_update_source(
+        self,
+        user_id: str,
+        playlist_id: str,
+        include_source: bool,
+        manually_confirmed: bool,
+    ) -> None:
+        self._run_cloud_context(
+            user_id,
+            lambda: self.update_source(
+                playlist_id=playlist_id,
+                include_source=include_source,
+                manually_confirmed=manually_confirmed,
+            ),
+        )
+
+    def cloud_top_up_live_queue(self, user_id: str, count: int = 3) -> dict[str, int]:
+        return self._run_cloud_context(
+            user_id, lambda: self.top_up_live_queue(count=count)
+        )
+
+    def cloud_start_poller(self, user_id: str) -> dict[str, bool]:
+        poller = self._cloud_poller_for_user(user_id)
+        poller.start()
+        return {"running": poller.running}
+
+    def cloud_stop_poller(self, user_id: str) -> dict[str, bool]:
+        poller = self._cloud_poller_for_user(user_id)
+        poller.stop()
+        return {"running": poller.running}
 
     def cloud_spotify_start_auth(self, user_id: str) -> dict[str, str]:
         if not self.settings.spotify_client_id:
@@ -305,14 +431,15 @@ class AftertasteService:
         }
 
     def run_cloud_master_once(self, user_id: str) -> dict[str, Any]:
-        tenant_engine = self.cloud_sync_engine_for_user(user_id)
-        tenant_db = tenant_engine.db
         spotify = self._cloud_spotify_client_for_user(user_id)
-        poller = self._cloud_poller_for_user(user_id)
         if not spotify.is_authorized():
             raise RuntimeError(
                 "Cloud Spotify is not connected for this account. Connect Spotify in web mode first."
             )
+
+        tenant_engine = self.cloud_sync_engine_for_user(user_id)
+        tenant_db = tenant_engine.db
+        poller = self._cloud_poller_for_user(user_id)
         if not poller.running:
             poller.start()
 
@@ -322,16 +449,12 @@ class AftertasteService:
         sync_summary.update(sync_top_items(tenant_db, spotify))
         sync_summary.update(reconcile_recent_history(tenant_db, spotify))
 
-        with self._context_lock:
-            original_db = self.db
-            original_spotify = self.spotify
-            try:
-                self.db = tenant_db
-                self.spotify = spotify
-                generated = self.generate_today_mix(write_to_spotify=True)
-            finally:
-                self.db = original_db
-                self.spotify = original_spotify
+        generated = self._run_cloud_context(
+            user_id,
+            lambda: self.generate_today_mix(write_to_spotify=True),
+        )
+
+        self._mark_cloud_automation_result(user_id, ok=True)
 
         return {
             "ok": True,
@@ -354,7 +477,12 @@ class AftertasteService:
                     if not poller.running:
                         poller.start()
                     self.run_cloud_master_once(user_id)
-                except Exception:
+                except Exception as exc:
+                    self._mark_cloud_automation_result(
+                        user_id,
+                        ok=False,
+                        error=str(exc),
+                    )
                     continue
 
     def _maybe_sync_cloud(self) -> None:
@@ -1595,4 +1723,5 @@ class AftertasteService:
             self._cloud_spotify_clients.clear()
             self._cloud_token_stores.clear()
             self._cloud_pkce_owner.clear()
+            self._cloud_automation_state.clear()
         self.db.close()

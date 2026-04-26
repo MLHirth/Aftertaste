@@ -119,6 +119,7 @@ export function syncCloudNow() {
     skipped: number
     last_pushed_seq?: number
     last_pulled_seq?: number
+    reseeded?: boolean
   }>('/sync/cloud-now', { method: 'POST' })
 }
 
@@ -143,6 +144,11 @@ export function cloudSpotifyStatus() {
     poller_running: boolean
     server_master_enabled: boolean
     server_master_interval_seconds: number
+    automation_thread_running: boolean
+    automation_run_count: number
+    automation_last_run_at: string | null
+    automation_last_ok: boolean
+    automation_last_error: string | null
   }>('/cloud/spotify/status')
 }
 

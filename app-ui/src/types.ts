@@ -6,6 +6,8 @@ export type ConfigStatus = {
   cloud_sync_enabled?: boolean
   cloud_api_base_url?: string | null
   server_master_enabled?: boolean
+  spotify_mode?: 'desktop' | 'server_managed'
+  cloud_spotify_connected?: boolean
 }
 
 export type DashboardData = {

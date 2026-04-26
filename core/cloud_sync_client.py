@@ -92,6 +92,24 @@ class CloudSyncClient:
             return payload
         return {"enabled": True, "ok": False, "error": "Invalid cloud status payload."}
 
+    def _push_remote_changes(
+        self,
+        *,
+        base: str,
+        token: str,
+        changes: list[dict[str, Any]],
+    ) -> None:
+        response = requests.post(
+            f"{base}/cloud/sync/push",
+            json={
+                "client_id": self.settings.cloud_client_id,
+                "changes": changes,
+            },
+            headers=self._headers(token),
+            timeout=30,
+        )
+        self._raise_for_status_with_detail(response)
+
     def sync_once(
         self,
         remote_name: str = "default",
@@ -118,28 +136,16 @@ class CloudSyncClient:
         export = self.sync_engine.export_changes(since_seq=last_pushed, limit=500)
         local_changes = export["changes"]
         local_last_seq = int(export["last_seq"])
-        pushed_by_table: dict[str, int] = dict(
-            sorted(
-                Counter(
-                    str(change.get("table") or "unknown") for change in local_changes
-                ).items()
-            )
-        )
+        pushed_counter: Counter[str] = Counter()
 
         pushed = 0
         if local_changes:
-            push_response = requests.post(
-                f"{base}/cloud/sync/push",
-                json={
-                    "client_id": self.settings.cloud_client_id,
-                    "changes": local_changes,
-                },
-                headers=self._headers(token),
-                timeout=30,
-            )
-            self._raise_for_status_with_detail(push_response)
+            self._push_remote_changes(base=base, token=token, changes=local_changes)
             pushed = len(local_changes)
             last_pushed = local_last_seq
+            pushed_counter.update(
+                str(change.get("table") or "unknown") for change in local_changes
+            )
 
         pull_response = requests.post(
             f"{base}/cloud/sync/pull",
@@ -159,6 +165,45 @@ class CloudSyncClient:
         apply_result = self.sync_engine.apply_changes(remote_changes)
         last_pulled = remote_last_seq
 
+        reseeded = False
+        if (
+            pushed == 0
+            and remote_last_seq == 0
+            and local_last_seq > 0
+            and last_pushed > 0
+        ):
+            reseeded = True
+            reseed_cursor = 0
+            while True:
+                chunk = self.sync_engine.export_changes(
+                    since_seq=reseed_cursor, limit=500
+                )
+                chunk_changes = chunk["changes"]
+                chunk_last_seq = int(chunk["last_seq"])
+                if not chunk_changes:
+                    break
+
+                self._push_remote_changes(base=base, token=token, changes=chunk_changes)
+                pushed += len(chunk_changes)
+                pushed_counter.update(
+                    str(change.get("table") or "unknown") for change in chunk_changes
+                )
+
+                if chunk_last_seq <= reseed_cursor:
+                    break
+                reseed_cursor = chunk_last_seq
+
+            if reseed_cursor > 0:
+                last_pushed = max(last_pushed, reseed_cursor)
+
+            remote_status = self.remote_status(bearer_token_override=token)
+            if remote_status.get("ok"):
+                last_pulled = max(
+                    last_pulled, int(remote_status.get("latest_seq") or 0)
+                )
+
+        pushed_by_table: dict[str, int] = dict(sorted(pushed_counter.items()))
+
         self.sync_engine.save_checkpoint(
             remote_name,
             last_pushed_seq=last_pushed,
@@ -174,4 +219,5 @@ class CloudSyncClient:
             "skipped": int(apply_result["skipped"]),
             "last_pushed_seq": last_pushed,
             "last_pulled_seq": last_pulled,
+            "reseeded": reseeded,
         }

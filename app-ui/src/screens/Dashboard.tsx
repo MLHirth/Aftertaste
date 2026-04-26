@@ -44,6 +44,11 @@ type CloudSpotifyState = {
   poller_running: boolean
   server_master_enabled: boolean
   server_master_interval_seconds: number
+  automation_thread_running: boolean
+  automation_run_count: number
+  automation_last_run_at: string | null
+  automation_last_ok: boolean
+  automation_last_error: string | null
 }
 
 const CLOUD_SPOTIFY_SESSION_KEY = 'aftertaste.cloudSpotifySessionId'
@@ -172,8 +177,11 @@ export function Dashboard() {
                       return
                     }
                     const pushedEvents = result.pushed_by_table?.play_events ?? 0
+                    const reseedNote = result.reseeded
+                      ? ' (server reseeded from full local history)'
+                      : ''
                     setCloudNote(
-                      `Cloud sync: pushed ${result.pushed} (play events ${pushedEvents}), pulled ${result.pulled}, applied ${result.applied}`,
+                      `Cloud sync: pushed ${result.pushed} (play events ${pushedEvents}), pulled ${result.pulled}, applied ${result.applied}${reseedNote}`,
                     )
                   })
                   .catch((error: unknown) => {
@@ -238,6 +246,24 @@ export function Dashboard() {
               ? `, server auto-run every ${cloudSpotify.server_master_interval_seconds}s`
               : ', server auto-run is disabled'}
           </p>
+          {cloudSpotify && (
+            <p className="muted">
+              Automation:{' '}
+              {cloudSpotify.automation_thread_running
+                ? 'scheduler active'
+                : 'scheduler inactive'}
+              {cloudSpotify.automation_last_run_at
+                ? `, last run ${new Date(cloudSpotify.automation_last_run_at).toLocaleString()}`
+                : ', no run yet'}
+              {cloudSpotify.automation_last_error
+                ? `, last error: ${cloudSpotify.automation_last_error}`
+                : cloudSpotify.automation_run_count > 0
+                  ? cloudSpotify.automation_last_ok
+                    ? ', last run ok'
+                    : ', last run failed'
+                  : ''}
+            </p>
+          )}
           <div className="row-actions">
             <button
               onClick={() => {

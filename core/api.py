@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 from typing import Any
@@ -148,112 +147,15 @@ def _cloud_principal_optional(
 
 
 def _dashboard_for_cloud_user(user_id: str) -> dict[str, Any]:
-    engine = service().cloud_sync_engine_for_user(user_id)
-    db = engine.db
-    spotify_status = service().cloud_spotify_status(user_id)
-    now_playing = service().cloud_spotify_now_playing(user_id)
-
-    likely_skips = db.query_one(
-        """
-      SELECT COUNT(*) AS c
-      FROM play_events
-      WHERE ended_reason = 'skip_early'
-        AND date(started_at) = date('now')
-      """
-    )
-    completions = db.query_one(
-        """
-      SELECT COUNT(*) AS c
-      FROM play_events
-      WHERE ended_reason = 'completed'
-        AND date(started_at) = date('now')
-      """
-    )
-
-    top_negative_artists = db.query_all(
-        """
-      SELECT a.artist_id, a.name, COUNT(*) AS skip_count
-      FROM play_events pe
-      JOIN track_artists ta ON ta.track_id = pe.track_id
-      JOIN artists a ON a.artist_id = ta.artist_id
-      WHERE pe.ended_reason = 'skip_early'
-        AND pe.started_at >= datetime('now', '-7 day')
-      GROUP BY a.artist_id, a.name
-      ORDER BY skip_count DESC
-      LIMIT 5
-      """
-    )
-
-    top_revived_tracks = db.query_all(
-        """
-      SELECT t.track_id, t.name, s.score_revival
-      FROM track_scores s
-      JOIN tracks t ON t.track_id = s.track_id
-      WHERE s.score_revival > 1.5
-      ORDER BY s.score_revival DESC, s.score_total DESC
-      LIMIT 5
-      """
-    )
-
-    next_refresh = datetime.now(tz=timezone.utc).replace(
-        hour=8, minute=0, second=0, microsecond=0
-    ) + timedelta(days=1)
-
-    return {
-        "now_playing": now_playing,
-        "likely_skip_count_today": int((likely_skips or {"c": 0})["c"]),
-        "completions_today": int((completions or {"c": 0})["c"]),
-        "top_negative_artists": top_negative_artists,
-        "top_revived_tracks": top_revived_tracks,
-        "next_playlist_refresh_time": next_refresh.isoformat(),
-        "poller_running": bool(spotify_status.get("poller_running")),
-        "cloud_sync_enabled": True,
-    }
+    return service().cloud_dashboard(user_id)
 
 
 def _memory_negative_artists_for_cloud_user(user_id: str) -> list[dict[str, Any]]:
-    engine = service().cloud_sync_engine_for_user(user_id)
-    db = engine.db
-    return db.query_all(
-        """
-      SELECT
-        a.artist_id,
-        a.name,
-        COUNT(*) AS early_skip_count,
-        MAX(pe.started_at) AS last_skip_at
-      FROM play_events pe
-      JOIN track_artists ta ON ta.track_id = pe.track_id
-      JOIN artists a ON a.artist_id = ta.artist_id
-      WHERE pe.ended_reason = 'skip_early'
-      GROUP BY a.artist_id, a.name
-      ORDER BY early_skip_count DESC
-      LIMIT 50
-      """
-    )
+    return service().cloud_memory_negative_artists(user_id)
 
 
 def _memory_tracks_for_cloud_user(user_id: str, limit: int) -> list[dict[str, Any]]:
-    engine = service().cloud_sync_engine_for_user(user_id)
-    db = engine.db
-    return db.query_all(
-        """
-      SELECT
-        t.track_id,
-        t.name,
-        REPLACE(GROUP_CONCAT(DISTINCT a.name), ',', ', ') AS artists,
-        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'skip_early' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS early_skips,
-        COUNT(DISTINCT CASE WHEN pe.ended_reason = 'completed' THEN COALESCE(pe.event_uid, 'legacy-' || pe.event_id) END) AS completions,
-        MAX(pe.ended_at) AS last_played
-      FROM tracks t
-      LEFT JOIN play_events pe ON pe.track_id = t.track_id
-      LEFT JOIN track_artists ta ON ta.track_id = t.track_id
-      LEFT JOIN artists a ON a.artist_id = ta.artist_id
-      GROUP BY t.track_id, t.name
-      ORDER BY early_skips DESC, completions DESC, last_played DESC
-      LIMIT ?
-      """,
-        (limit,),
-    )
+    return service().cloud_memory_tracks(user_id, limit=limit)
 
 
 @app.get("/health")
@@ -262,8 +164,21 @@ def health() -> dict[str, str]:
 
 
 @app.get("/config/status")
-def config_status() -> dict[str, Any]:
-    return service().auth_status()
+def config_status(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, Any]:
+    status = service().auth_status()
+    if principal is None:
+        status["spotify_mode"] = "desktop"
+        return status
+
+    cloud = service().cloud_spotify_status(principal.user_id)
+    status["authorized"] = bool(cloud.get("connected"))
+    status["db_path"] = f"cloud-tenant:{principal.user_id}"
+    status["spotify_mode"] = "server_managed"
+    status["cloud_spotify_connected"] = bool(cloud.get("connected"))
+    status["server_master_enabled"] = bool(cloud.get("server_master_enabled"))
+    return status
 
 
 @app.post("/auth/start")
@@ -319,8 +234,12 @@ def sync_recent() -> dict[str, int]:
 
 
 @app.post("/sync/all")
-def sync_all() -> dict[str, int]:
+def sync_all(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, int]:
     try:
+        if principal is not None:
+            return service().cloud_sync_all(principal.user_id)
         return service().sync_all()
     except Exception as exc:
         raise _as_http_error(exc) from exc
@@ -349,40 +268,72 @@ def sync_cloud_status(
 
 
 @app.post("/poller/start")
-def poller_start() -> dict[str, bool]:
+def poller_start(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, bool]:
     try:
+        if principal is not None:
+            return service().cloud_start_poller(principal.user_id)
         return service().start_poller()
     except Exception as exc:
         raise _as_http_error(exc) from exc
 
 
 @app.post("/poller/stop")
-def poller_stop() -> dict[str, bool]:
+def poller_stop(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, bool]:
     try:
+        if principal is not None:
+            return service().cloud_stop_poller(principal.user_id)
         return service().stop_poller()
     except Exception as exc:
         raise _as_http_error(exc) from exc
 
 
 @app.post("/generate/today")
-def generate_today(body: GenerateBody) -> dict[str, Any]:
+def generate_today(
+    body: GenerateBody,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, Any]:
     try:
+        if principal is not None:
+            return service().cloud_generate_today_mix(
+                principal.user_id,
+                write_to_spotify=body.write_to_spotify,
+            )
         return service().generate_today_mix(write_to_spotify=body.write_to_spotify)
     except Exception as exc:
         raise _as_http_error(exc) from exc
 
 
 @app.post("/generate/vibe-revival")
-def generate_vibe_revival(body: GenerateBody) -> dict[str, Any]:
+def generate_vibe_revival(
+    body: GenerateBody,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, Any]:
     try:
+        if principal is not None:
+            return service().cloud_generate_vibe_revival(
+                principal.user_id,
+                write_to_spotify=body.write_to_spotify,
+            )
         return service().generate_vibe_revival(write_to_spotify=body.write_to_spotify)
     except Exception as exc:
         raise _as_http_error(exc) from exc
 
 
 @app.post("/queue/top-up")
-def queue_top_up(body: QueueBody) -> dict[str, int]:
+def queue_top_up(
+    body: QueueBody,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, int]:
     try:
+        if principal is not None:
+            return service().cloud_top_up_live_queue(
+                principal.user_id,
+                count=body.target_depth,
+            )
         return service().top_up_live_queue(count=body.target_depth)
     except Exception as exc:
         raise _as_http_error(exc) from exc
@@ -398,7 +349,12 @@ def dashboard(
 
 
 @app.get("/today-mix")
-def today_mix(limit: int = 40) -> list[dict[str, Any]]:
+def today_mix(
+    limit: int = 40,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> list[dict[str, Any]]:
+    if principal is not None:
+        return service().cloud_get_today_mix(principal.user_id, limit=limit)
     return service().get_today_mix(limit=limit)
 
 
@@ -422,22 +378,48 @@ def memory_tracks(
 
 
 @app.get("/rules")
-def rules() -> dict[str, float]:
+def rules(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, float]:
+    if principal is not None:
+        return service().cloud_get_rules(principal.user_id)
     return service().get_rules()
 
 
 @app.put("/rules")
-def save_rules(body: RulesBody) -> dict[str, float]:
+def save_rules(
+    body: RulesBody,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, float]:
+    if principal is not None:
+        return service().cloud_save_rules(principal.user_id, body.updates)
     return service().save_rules(body.updates)
 
 
 @app.get("/sources")
-def sources() -> list[dict[str, Any]]:
+def sources(
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> list[dict[str, Any]]:
+    if principal is not None:
+        return service().cloud_list_sources(principal.user_id)
     return service().list_sources()
 
 
 @app.put("/sources/{playlist_id}")
-def save_source(playlist_id: str, body: SourceBody) -> dict[str, bool]:
+def save_source(
+    playlist_id: str,
+    body: SourceBody,
+    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+) -> dict[str, bool]:
+    if principal is not None:
+        service().cloud_update_source(
+            principal.user_id,
+            playlist_id=playlist_id,
+            include_source=body.include_source,
+            manually_confirmed=body.manually_confirmed,
+        )
+        return {"ok": True}
+
     service().update_source(
         playlist_id=playlist_id,
         include_source=body.include_source,
