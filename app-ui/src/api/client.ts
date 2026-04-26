@@ -103,11 +103,13 @@ export function syncCloudNow() {
 
 export function cloudSyncStatus() {
   return request<{
+    enabled?: boolean
     ok: boolean
-    user_id: string
-    latest_seq: number
-    checkpoint: { last_pushed_seq: number; last_pulled_seq: number }
-  }>('/cloud/sync/status')
+    user_id?: string
+    latest_seq?: number
+    checkpoint?: { last_pushed_seq: number; last_pulled_seq: number }
+    error?: string
+  }>('/sync/cloud-status')
 }
 
 export function generateToday(writeToSpotify: boolean) {

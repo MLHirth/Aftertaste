@@ -110,8 +110,8 @@ def _as_http_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
 
 
-def _cloud_principal(
-    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+def _authenticate_cloud_credentials(
+    credentials: HTTPAuthorizationCredentials | None,
 ) -> CloudPrincipal:
     authorization_header = None
     if credentials is not None:
@@ -124,6 +124,12 @@ def _cloud_principal(
         raise HTTPException(
             status_code=401, detail=f"Invalid cloud auth token: {exc}"
         ) from exc
+
+
+def _cloud_principal(
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+) -> CloudPrincipal:
+    return _authenticate_cloud_credentials(credentials)
 
 
 @app.get("/health")
@@ -203,6 +209,17 @@ def sync_cloud_now(
     try:
         token_override = credentials.credentials if credentials is not None else None
         return service().sync_cloud_once(bearer_token_override=token_override)
+    except Exception as exc:
+        raise _as_http_error(exc) from exc
+
+
+@app.get("/sync/cloud-status")
+def sync_cloud_status(
+    credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
+) -> dict[str, Any]:
+    try:
+        token_override = credentials.credentials if credentials is not None else None
+        return service().sync_cloud_status(bearer_token_override=token_override)
     except Exception as exc:
         raise _as_http_error(exc) from exc
 

@@ -24,31 +24,89 @@ class CloudSyncClient:
             "Content-Type": "application/json",
         }
 
-    def sync_once(
-        self,
-        remote_name: str = "default",
-        bearer_token_override: str | None = None,
-    ) -> dict[str, Any]:
+    def _token_or_disabled(
+        self, bearer_token_override: str | None = None
+    ) -> tuple[bool, str, str | None]:
         if not self.is_enabled():
-            return {
-                "enabled": False,
-                "pushed": 0,
-                "pulled": 0,
-                "applied": 0,
-                "skipped": 0,
-            }
+            return False, "", "Cloud sync is not enabled."
 
         token = (
             bearer_token_override or self.settings.cloud_bearer_token or ""
         ).strip()
         if not token:
+            return False, "", "Missing cloud bearer token for sync."
+
+        return True, token, None
+
+    def _raise_for_status_with_detail(self, response: requests.Response) -> None:
+        if response.ok:
+            return
+
+        detail: str | None = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                detail_value = payload.get("detail")
+                if isinstance(detail_value, str) and detail_value.strip():
+                    detail = detail_value.strip()
+        except Exception:
+            detail = None
+
+        if detail is None:
+            body = response.text.strip()
+            if body:
+                detail = body[:240]
+
+        status_line = f"{response.status_code} {response.reason}"
+        if detail:
+            raise RuntimeError(f"{status_line}: {detail}")
+
+        response.raise_for_status()
+
+    def remote_status(
+        self,
+        bearer_token_override: str | None = None,
+    ) -> dict[str, Any]:
+        enabled, token, error = self._token_or_disabled(
+            bearer_token_override=bearer_token_override
+        )
+        if not enabled:
+            return {
+                "enabled": False,
+                "ok": False,
+                "error": error,
+            }
+
+        base = (self.settings.cloud_api_base_url or "").rstrip("/")
+        response = requests.get(
+            f"{base}/cloud/sync/status",
+            headers=self._headers(token),
+            timeout=30,
+        )
+        self._raise_for_status_with_detail(response)
+
+        payload = response.json()
+        if isinstance(payload, dict):
+            payload["enabled"] = True
+            return payload
+        return {"enabled": True, "ok": False, "error": "Invalid cloud status payload."}
+
+    def sync_once(
+        self,
+        remote_name: str = "default",
+        bearer_token_override: str | None = None,
+    ) -> dict[str, Any]:
+        enabled, token, error = self._token_or_disabled(
+            bearer_token_override=bearer_token_override
+        )
+        if not enabled:
             return {
                 "enabled": False,
                 "pushed": 0,
                 "pulled": 0,
                 "applied": 0,
                 "skipped": 0,
-                "error": "Missing cloud bearer token for sync.",
+                "error": error,
             }
 
         base = (self.settings.cloud_api_base_url or "").rstrip("/")
@@ -71,7 +129,7 @@ class CloudSyncClient:
                 headers=self._headers(token),
                 timeout=30,
             )
-            push_response.raise_for_status()
+            self._raise_for_status_with_detail(push_response)
             pushed = len(local_changes)
             last_pushed = local_last_seq
 
@@ -85,7 +143,7 @@ class CloudSyncClient:
             headers=self._headers(token),
             timeout=30,
         )
-        pull_response.raise_for_status()
+        self._raise_for_status_with_detail(pull_response)
         pull_payload = pull_response.json()
         remote_changes = pull_payload.get("changes") or []
         remote_last_seq = int(pull_payload.get("last_seq") or last_pulled)

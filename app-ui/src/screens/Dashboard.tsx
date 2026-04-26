@@ -10,6 +10,10 @@ function pct(progressMs: number, durationMs: number) {
   return Math.round((progressMs / durationMs) * 100)
 }
 
+function isDesktopApp() {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+}
+
 function explainCloudError(message: string) {
   const normalized = message.toLowerCase()
   if (normalized.includes('audience')) {
@@ -125,8 +129,16 @@ export function Dashboard() {
               onClick={() => {
                 void cloudSyncStatus()
                   .then((result) => {
+                    if (!result.enabled) {
+                      setCloudNote(result.error ?? 'Cloud sync is not configured on this client yet.')
+                      return
+                    }
+                    if (!result.ok || !result.user_id || !result.checkpoint) {
+                      setCloudNote(result.error ?? 'Cloud status check failed.')
+                      return
+                    }
                     setCloudNote(
-                      `Cloud account ${result.user_id}: remote seq ${result.latest_seq}, pulled ${result.checkpoint.last_pulled_seq}`,
+                      `Cloud account ${result.user_id}: remote seq ${result.latest_seq ?? 0}, pulled ${result.checkpoint.last_pulled_seq}`,
                     )
                   })
                   .catch((error: unknown) => {
@@ -152,7 +164,7 @@ export function Dashboard() {
         </section>
       )}
 
-      {status?.has_client_id && !status.authorized && (
+      {isDesktopApp() && status?.has_client_id && !status.authorized && (
         <section className="panel auth-panel">
           <h3>Connect Spotify (PKCE)</h3>
           <p>

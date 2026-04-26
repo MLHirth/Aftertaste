@@ -41,25 +41,36 @@ class CloudAuth:
         if self._jwks_client is None:
             self._jwks_client = jwt.PyJWKClient(self.settings.clerk_jwks_url)
 
-        signing_key = self._jwks_client.get_signing_key_from_jwt(token)
-        verify_aud = bool(self.settings.clerk_audience)
-        verify_iss = bool(self.settings.clerk_issuer)
+        try:
+            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
+            verify_aud = bool(self.settings.clerk_audience)
+            verify_iss = bool(self.settings.clerk_issuer)
 
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=self.settings.clerk_audience if verify_aud else None,
-            issuer=self.settings.clerk_issuer if verify_iss else None,
-            options={
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_nbf": True,
-                "verify_iat": True,
-                "verify_aud": verify_aud,
-                "verify_iss": verify_iss,
-            },
-        )
+            claims = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=self.settings.clerk_audience if verify_aud else None,
+                issuer=self.settings.clerk_issuer if verify_iss else None,
+                options={
+                    "verify_signature": True,
+                    "verify_exp": True,
+                    "verify_nbf": True,
+                    "verify_iat": True,
+                    "verify_aud": verify_aud,
+                    "verify_iss": verify_iss,
+                },
+            )
+        except jwt.ExpiredSignatureError as exc:
+            raise CloudAuthError("Clerk token expired.") from exc
+        except jwt.InvalidAudienceError as exc:
+            raise CloudAuthError("Clerk token audience mismatch.") from exc
+        except jwt.InvalidIssuerError as exc:
+            raise CloudAuthError("Clerk token issuer mismatch.") from exc
+        except jwt.InvalidSignatureError as exc:
+            raise CloudAuthError("Clerk token signature invalid.") from exc
+        except Exception as exc:
+            raise CloudAuthError(f"Clerk token validation failed: {exc}") from exc
 
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject:

@@ -121,6 +121,13 @@ class AftertasteService:
             bearer_token_override=bearer_token_override,
         )
 
+    def sync_cloud_status(
+        self, bearer_token_override: str | None = None
+    ) -> dict[str, Any]:
+        return self.cloud_sync_client.remote_status(
+            bearer_token_override=bearer_token_override,
+        )
+
     def cloud_sync_engine_for_user(self, user_id: str) -> CloudSyncEngine:
         normalized_user = user_id.strip()
         if not normalized_user:

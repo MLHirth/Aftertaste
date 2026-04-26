@@ -116,6 +116,12 @@ Desktop Clerk flow:
 3. Sign in there and click `Open in app`.
 4. App receives a deep link (`aftertaste://clerk-callback`) and stores auth token for cloud sync.
 
+If cloud sync returns `401 Unauthorized`, make sure desktop and server agree on Clerk token shape:
+
+- set `VITE_CLERK_JWT_TEMPLATE` in desktop/web build env
+- set matching `CLERK_AUDIENCE` on server (or leave it empty if your template has no audience)
+- ensure `CLERK_ISSUER` and `CLERK_JWKS_URL` come from the same Clerk instance
+
 Backend cloud endpoints verify Clerk JWTs with:
 
 - `CLERK_AUTH_ENABLED=1`
