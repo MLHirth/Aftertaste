@@ -1,0 +1,23 @@
+services:
+  aftertaste:
+    build:
+      context: .
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL-}
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY-}
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      AFTERTASTE_SERVE_WEB: "1"
+      AFTERTASTE_API_HOST: "0.0.0.0"
+      AFTERTASTE_API_PORT: "8765"
+      AFTERTASTE_DB_PATH: "/data/aftertaste.db"
+      AFTERTASTE_CLOUD_TENANT_DB_DIR: "/data/cloud-tenants"
+    volumes:
+      - aftertaste_data:/data
+    restart: unless-stopped
+
+volumes:
+  aftertaste_data:

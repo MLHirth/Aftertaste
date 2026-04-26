@@ -1,0 +1,12 @@
+.git
+.venv
+__pycache__
+core/__pycache__
+aftertaste_core.egg-info
+aftertaste.db
+*.db
+*.db-shm
+*.db-wal
+app-ui/node_modules
+app-ui/dist
+app-ui/src-tauri/target
