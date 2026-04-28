@@ -74,8 +74,11 @@ function ClerkTokenBridge() {
   useEffect(() => {
     setAuthTokenProvider(
       async () =>
-        (await getToken(clerkJwtTemplate ? { template: clerkJwtTemplate } : undefined)) ??
-        null,
+        (await getToken(
+          clerkJwtTemplate
+            ? { template: clerkJwtTemplate, skipCache: true }
+            : { skipCache: true },
+        )) ?? null,
     )
     return () => {
       setAuthTokenProvider(null)

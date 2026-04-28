@@ -259,6 +259,15 @@ class AftertasteService:
         client = self._cloud_spotify_client_for_user(user_id)
         poller = self._cloud_poller_for_user(user_id)
         automation_state = self._cloud_automation_state.get(user_id) or {}
+        auth_error: str | None = None
+        authorized = client.is_authorized()
+
+        if authorized:
+            try:
+                client.get_me()
+            except Exception as exc:
+                authorized = False
+                auth_error = str(exc)
         expires_at = (
             client.access_token_expires_at.isoformat()
             if client.access_token_expires_at
@@ -266,9 +275,10 @@ class AftertasteService:
         )
         return {
             "connected": bool(client.refresh_token),
-            "authorized": client.is_authorized(),
+            "authorized": authorized,
             "has_refresh_token": bool(client.refresh_token),
             "access_token_expires_at": expires_at,
+            "auth_error": auth_error,
             "poller_running": poller.running,
             "server_master_enabled": self.settings.server_master_enabled,
             "server_master_interval_seconds": self.settings.server_master_interval_seconds,

@@ -141,6 +141,7 @@ export function cloudSpotifyStatus() {
     authorized: boolean
     has_refresh_token: boolean
     access_token_expires_at: string | null
+    auth_error: string | null
     poller_running: boolean
     server_master_enabled: boolean
     server_master_interval_seconds: number

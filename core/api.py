@@ -141,7 +141,7 @@ def _cloud_principal(
 def _cloud_principal_optional(
     credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
 ) -> CloudPrincipal | None:
-    if credentials is None:
+    if not settings.clerk_auth_enabled:
         return None
     return _authenticate_cloud_credentials(credentials)
 

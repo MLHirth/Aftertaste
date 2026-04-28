@@ -41,6 +41,7 @@ type CloudSpotifyState = {
   authorized: boolean
   has_refresh_token: boolean
   access_token_expires_at: string | null
+  auth_error: string | null
   poller_running: boolean
   server_master_enabled: boolean
   server_master_interval_seconds: number
@@ -264,6 +265,7 @@ export function Dashboard() {
                   : ''}
             </p>
           )}
+          {cloudSpotify?.auth_error && <p className="muted">Spotify auth error: {cloudSpotify.auth_error}</p>}
           <div className="row-actions">
             <button
               onClick={() => {
