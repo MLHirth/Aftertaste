@@ -28,6 +28,7 @@ class Settings:
     cloud_spotify_redirect_uri: str | None
     server_master_enabled: bool
     server_master_interval_seconds: int
+    server_token_encryption_key: str | None
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -78,4 +79,6 @@ def load_settings() -> Settings:
             30,
             int(os.getenv("AFTERTASTE_SERVER_MASTER_INTERVAL_SECONDS", "180")),
         ),
+        server_token_encryption_key=os.getenv("AFTERTASTE_SERVER_TOKEN_ENCRYPTION_KEY")
+        or None,
     )

@@ -141,7 +141,12 @@ Then in web Dashboard, use `Connect Spotify on Server` once per server process.
 
 When connected, hosted web mode can show current playback from server-side Spotify auth and keep play-event memory growing even with desktop closed.
 
-Important security note: server-side Spotify refresh tokens are stored in process memory only (not persisted to disk). After server restart, reconnect Spotify in web mode.
+Security/persistence options:
+
+- if `AFTERTASTE_SERVER_TOKEN_ENCRYPTION_KEY` is empty, server-side Spotify refresh tokens are memory-only (lost on restart)
+- if `AFTERTASTE_SERVER_TOKEN_ENCRYPTION_KEY` is set, tokens are persisted in tenant SQLite encrypted with AES-GCM + per-token random salt/nonce, using PBKDF2 key derivation bound to user id
+
+Recommended: set a long random `AFTERTASTE_SERVER_TOKEN_ENCRYPTION_KEY` in server env so reconnect is not required after restart.
 
 ## Deploy on server (Docker)
 

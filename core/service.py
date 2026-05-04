@@ -5,11 +5,17 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import math
+import os
 from pathlib import Path
 import random
 import re
+import sqlite3
 import threading
 from typing import Any, Callable, TypeVar
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from core.auth_pkce import PKCEManager, TokenStore
 from core.candidate_builder import build_candidates, rebuild_transition_edges
@@ -40,6 +46,137 @@ class InMemoryTokenStore:
 
     def save_refresh_token(self, token: str) -> None:
         self._refresh_token = token
+
+    def storage_mode(self) -> str:
+        return "memory_only"
+
+    def has_persisted_token(self) -> bool:
+        return False
+
+    def last_error(self) -> str | None:
+        return None
+
+
+class EncryptedTenantTokenStore:
+    def __init__(self, db: Database, user_id: str, master_secret: str) -> None:
+        self.db = db
+        self.user_id = user_id
+        self.master_secret = master_secret
+        self._last_error: str | None = None
+
+    def _derive_key(self, salt: bytes) -> bytes:
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=390000,
+        )
+        material = f"{self.master_secret}|{self.user_id}".encode("utf-8")
+        return kdf.derive(material)
+
+    def _encrypt_token(self, token: str, salt: bytes, nonce: bytes) -> bytes:
+        key = self._derive_key(salt)
+        aead = AESGCM(key)
+        return aead.encrypt(nonce, token.encode("utf-8"), self.user_id.encode("utf-8"))
+
+    def _decrypt_token(self, ciphertext: bytes, salt: bytes, nonce: bytes) -> str:
+        key = self._derive_key(salt)
+        aead = AESGCM(key)
+        plain = aead.decrypt(nonce, ciphertext, self.user_id.encode("utf-8"))
+        return plain.decode("utf-8")
+
+    def _set_error(self, message: str) -> None:
+        self._last_error = message
+        self.db.execute(
+            "UPDATE cloud_spotify_tokens SET last_error = ? WHERE user_id = ?",
+            (message, self.user_id),
+        )
+
+    def load_refresh_token(self) -> str | None:
+        row = self.db.query_one(
+            """
+          SELECT token_ciphertext, token_salt, token_nonce
+          FROM cloud_spotify_tokens
+          WHERE user_id = ?
+          """,
+            (self.user_id,),
+        )
+        if row is None:
+            self._last_error = None
+            return None
+
+        try:
+            ciphertext = bytes(row.get("token_ciphertext") or b"")
+            salt = bytes(row.get("token_salt") or b"")
+            nonce = bytes(row.get("token_nonce") or b"")
+            token = self._decrypt_token(ciphertext, salt, nonce)
+            now = datetime.now(tz=timezone.utc).isoformat()
+            self.db.execute(
+                "UPDATE cloud_spotify_tokens SET last_loaded_at = ?, last_error = NULL WHERE user_id = ?",
+                (now, self.user_id),
+            )
+            self._last_error = None
+            return token
+        except Exception as exc:
+            self._set_error(f"decrypt failed: {exc}")
+            return None
+
+    def save_refresh_token(self, token: str) -> None:
+        try:
+            salt = os.urandom(16)
+            nonce = os.urandom(12)
+            ciphertext = self._encrypt_token(token, salt, nonce)
+            now = datetime.now(tz=timezone.utc).isoformat()
+            self.db.execute(
+                """
+              INSERT INTO cloud_spotify_tokens(
+                user_id,
+                token_ciphertext,
+                token_salt,
+                token_nonce,
+                created_at,
+                updated_at,
+                last_loaded_at,
+                last_error
+              ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+              ON CONFLICT(user_id)
+              DO UPDATE SET
+                token_ciphertext = excluded.token_ciphertext,
+                token_salt = excluded.token_salt,
+                token_nonce = excluded.token_nonce,
+                updated_at = excluded.updated_at,
+                last_error = NULL
+              """,
+                (self.user_id, ciphertext, salt, nonce, now, now),
+            )
+            self._last_error = None
+        except Exception as exc:
+            self._last_error = f"encrypt/save failed: {exc}"
+            raise RuntimeError(
+                "Failed to persist encrypted server Spotify token."
+            ) from exc
+
+    def storage_mode(self) -> str:
+        return "encrypted_db"
+
+    def has_persisted_token(self) -> bool:
+        row = self.db.query_one(
+            "SELECT 1 AS ok FROM cloud_spotify_tokens WHERE user_id = ? LIMIT 1",
+            (self.user_id,),
+        )
+        return row is not None
+
+    def last_error(self) -> str | None:
+        if self._last_error:
+            return self._last_error
+        row = self.db.query_one(
+            "SELECT last_error FROM cloud_spotify_tokens WHERE user_id = ?",
+            (self.user_id,),
+        )
+        if row is None:
+            return None
+        error_value = row.get("last_error")
+        return str(error_value) if error_value else None
 
 
 class AftertasteService:
@@ -73,6 +210,8 @@ class AftertasteService:
 
         if self.spotify.is_authorized():
             self.poller.start()
+
+        self._hydrate_persisted_cloud_spotify_sessions()
 
         if self.settings.server_master_enabled:
             self._automation_thread = threading.Thread(
@@ -192,7 +331,17 @@ class AftertasteService:
             if existing is not None:
                 return existing
 
-            token_store = InMemoryTokenStore()
+            tenant_db = self.cloud_sync_engine_for_user(normalized_user).db
+            if self.settings.server_token_encryption_key:
+                token_store: InMemoryTokenStore | EncryptedTenantTokenStore = (
+                    EncryptedTenantTokenStore(
+                        db=tenant_db,
+                        user_id=normalized_user,
+                        master_secret=self.settings.server_token_encryption_key,
+                    )
+                )
+            else:
+                token_store = InMemoryTokenStore()
             client_settings = replace(
                 self.settings,
                 spotify_redirect_uri=(
@@ -204,6 +353,41 @@ class AftertasteService:
             self._cloud_token_stores[normalized_user] = token_store
             self._cloud_spotify_clients[normalized_user] = client
             return client
+
+    def _list_persisted_cloud_users(self) -> list[str]:
+        users: set[str] = set()
+        db_dir = self.settings.cloud_tenant_db_dir
+        if not db_dir.exists():
+            return []
+
+        for db_path in db_dir.glob("*.db"):
+            try:
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT 1 FROM cloud_spotify_tokens LIMIT 1"
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if row:
+                    users.add(db_path.stem)
+            except Exception:
+                continue
+
+        return sorted(users)
+
+    def _hydrate_persisted_cloud_spotify_sessions(self) -> None:
+        if not self.settings.server_token_encryption_key:
+            return
+
+        for user_id in self._list_persisted_cloud_users():
+            try:
+                client = self._cloud_spotify_client_for_user(user_id)
+                if client.is_authorized():
+                    poller = self._cloud_poller_for_user(user_id)
+                    poller.start()
+            except Exception as exc:
+                self._mark_cloud_automation_result(user_id, ok=False, error=str(exc))
 
     def _cloud_poller_for_user(self, user_id: str) -> PlaybackPoller:
         normalized_user = user_id.strip()
@@ -258,6 +442,7 @@ class AftertasteService:
     def cloud_spotify_status(self, user_id: str) -> dict[str, Any]:
         client = self._cloud_spotify_client_for_user(user_id)
         poller = self._cloud_poller_for_user(user_id)
+        token_store = self._cloud_token_stores.get(user_id)
         automation_state = self._cloud_automation_state.get(user_id) or {}
         auth_error: str | None = None
         authorized = client.is_authorized()
@@ -279,6 +464,17 @@ class AftertasteService:
             "has_refresh_token": bool(client.refresh_token),
             "access_token_expires_at": expires_at,
             "auth_error": auth_error,
+            "token_storage_mode": (
+                token_store.storage_mode() if token_store is not None else "memory_only"
+            ),
+            "token_persisted": (
+                bool(token_store.has_persisted_token())
+                if token_store is not None
+                else False
+            ),
+            "token_store_error": (
+                token_store.last_error() if token_store is not None else None
+            ),
             "poller_running": poller.running,
             "server_master_enabled": self.settings.server_master_enabled,
             "server_master_interval_seconds": self.settings.server_master_interval_seconds,
@@ -443,6 +639,11 @@ class AftertasteService:
     def run_cloud_master_once(self, user_id: str) -> dict[str, Any]:
         spotify = self._cloud_spotify_client_for_user(user_id)
         if not spotify.is_authorized():
+            self._mark_cloud_automation_result(
+                user_id,
+                ok=False,
+                error="Cloud Spotify is not connected.",
+            )
             raise RuntimeError(
                 "Cloud Spotify is not connected for this account. Connect Spotify in web mode first."
             )
@@ -453,18 +654,22 @@ class AftertasteService:
         if not poller.running:
             poller.start()
 
-        sync_summary: dict[str, int] = {}
-        sync_summary.update(sync_saved_tracks(tenant_db, spotify))
-        sync_summary.update(sync_playlists(tenant_db, spotify))
-        sync_summary.update(sync_top_items(tenant_db, spotify))
-        sync_summary.update(reconcile_recent_history(tenant_db, spotify))
+        try:
+            sync_summary: dict[str, int] = {}
+            sync_summary.update(sync_saved_tracks(tenant_db, spotify))
+            sync_summary.update(sync_playlists(tenant_db, spotify))
+            sync_summary.update(sync_top_items(tenant_db, spotify))
+            sync_summary.update(reconcile_recent_history(tenant_db, spotify))
 
-        generated = self._run_cloud_context(
-            user_id,
-            lambda: self.generate_today_mix(write_to_spotify=True),
-        )
+            generated = self._run_cloud_context(
+                user_id,
+                lambda: self.generate_today_mix(write_to_spotify=True),
+            )
 
-        self._mark_cloud_automation_result(user_id, ok=True)
+            self._mark_cloud_automation_result(user_id, ok=True)
+        except Exception as exc:
+            self._mark_cloud_automation_result(user_id, ok=False, error=str(exc))
+            raise
 
         return {
             "ok": True,
