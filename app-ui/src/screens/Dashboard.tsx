@@ -42,6 +42,9 @@ type CloudSpotifyState = {
   has_refresh_token: boolean
   access_token_expires_at: string | null
   auth_error: string | null
+  token_storage_mode: string
+  token_persisted: boolean
+  token_store_error: string | null
   poller_running: boolean
   server_master_enabled: boolean
   server_master_interval_seconds: number
@@ -264,6 +267,19 @@ export function Dashboard() {
                     : ', last run failed'
                   : ''}
             </p>
+          )}
+          {cloudSpotify && (
+            <p className="muted">
+              Token storage: {cloudSpotify.token_storage_mode}
+              {cloudSpotify.token_storage_mode === 'encrypted_db'
+                ? cloudSpotify.token_persisted
+                  ? ', persisted'
+                  : ', not persisted yet'
+                : ', memory only'}
+            </p>
+          )}
+          {cloudSpotify?.token_store_error && (
+            <p className="muted">Token storage error: {cloudSpotify.token_store_error}</p>
           )}
           {cloudSpotify?.auth_error && <p className="muted">Spotify auth error: {cloudSpotify.auth_error}</p>}
           <div className="row-actions">
