@@ -471,7 +471,9 @@ def cloud_spotify_automation_run(
     principal: CloudPrincipal = Depends(_cloud_principal),
 ) -> dict[str, Any]:
     try:
-        return service().run_cloud_master_once(principal.user_id)
+        payload = service().trigger_cloud_master_now(principal.user_id)
+        payload["user_id"] = principal.user_id
+        return payload
     except Exception as exc:
         raise _as_http_error(exc) from exc
 

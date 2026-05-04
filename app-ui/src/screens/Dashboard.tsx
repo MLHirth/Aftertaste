@@ -35,6 +35,22 @@ function explainCloudError(message: string) {
   return message
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: number | null = null
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(message)), ms)
+      }),
+    ])
+  } finally {
+    if (timer !== null) {
+      window.clearTimeout(timer)
+    }
+  }
+}
+
 type CloudSpotifyState = {
   user_id: string
   connected: boolean
@@ -53,6 +69,7 @@ type CloudSpotifyState = {
   automation_last_run_at: string | null
   automation_last_ok: boolean
   automation_last_error: string | null
+  manual_run_active: boolean
 }
 
 const CLOUD_SPOTIFY_SESSION_KEY = 'aftertaste.cloudSpotifySessionId'
@@ -63,26 +80,37 @@ export function Dashboard() {
   const [displayTrackId, setDisplayTrackId] = useState<string | null>(null)
   const [cloudNote, setCloudNote] = useState<string | null>(null)
   const [cloudSpotify, setCloudSpotify] = useState<CloudSpotifyState | null>(null)
-  const [cloudSpotifyLoading, setCloudSpotifyLoading] = useState(false)
+  const [cloudSpotifyStatusLoading, setCloudSpotifyStatusLoading] = useState(false)
+  const [cloudSpotifyConnectLoading, setCloudSpotifyConnectLoading] = useState(false)
+  const [cloudAutomationLoading, setCloudAutomationLoading] = useState(false)
   const auth = useAuthStore()
   const playback = usePlaybackStore()
+
+  const refreshCloudSpotifyStatus = async () => {
+    if (isDesktopApp() || !isClerkEnabled()) {
+      return
+    }
+
+    setCloudSpotifyStatusLoading(true)
+    try {
+      const statusPayload = await withTimeout(
+        cloudSpotifyStatus(),
+        12000,
+        'Cloud Spotify status timed out. This is often a temporary 524 from the server.',
+      )
+      setCloudSpotify(statusPayload)
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Cloud Spotify status failed.'
+      setCloudNote(explainCloudError(message))
+    } finally {
+      setCloudSpotifyStatusLoading(false)
+    }
+  }
 
   useEffect(() => {
     void auth.refreshStatus()
     void playback.refreshDashboard()
-
-    if (!isDesktopApp() && isClerkEnabled()) {
-      setCloudSpotifyLoading(true)
-      void cloudSpotifyStatus()
-        .then((statusPayload) => {
-          setCloudSpotify(statusPayload)
-        })
-        .catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : 'Cloud Spotify status failed.'
-          setCloudNote(explainCloudError(message))
-        })
-        .finally(() => setCloudSpotifyLoading(false))
-    }
+    void refreshCloudSpotifyStatus()
 
     if (!isDesktopApp()) {
       const params = new URLSearchParams(window.location.search)
@@ -90,11 +118,14 @@ export function Dashboard() {
       const state = params.get('state')
       const sessionId = window.sessionStorage.getItem(CLOUD_SPOTIFY_SESSION_KEY)
       if (code && state && sessionId) {
-        setCloudSpotifyLoading(true)
-        void cloudSpotifyAuthExchange(sessionId, state, code)
-          .then(() => cloudSpotifyStatus())
-          .then((statusPayload) => {
-            setCloudSpotify(statusPayload)
+        setCloudSpotifyConnectLoading(true)
+        void withTimeout(
+          cloudSpotifyAuthExchange(sessionId, state, code),
+          15000,
+          'Cloud Spotify connect timed out. Try again in a few seconds.',
+        )
+          .then(() => refreshCloudSpotifyStatus())
+          .then(() => {
             setCloudNote('Server Spotify connected. Automation can now run from the hosted server.')
           })
           .catch((error: unknown) => {
@@ -103,7 +134,7 @@ export function Dashboard() {
           })
           .finally(() => {
             window.sessionStorage.removeItem(CLOUD_SPOTIFY_SESSION_KEY)
-            setCloudSpotifyLoading(false)
+            setCloudSpotifyConnectLoading(false)
             const clean = `${window.location.origin}${window.location.pathname}${window.location.hash}`
             window.history.replaceState({}, document.title, clean)
           })
@@ -118,9 +149,14 @@ export function Dashboard() {
       void auth.refreshStatus()
     }, 15000)
 
+    const cloudStatusInterval = window.setInterval(() => {
+      void refreshCloudSpotifyStatus()
+    }, 20000)
+
     return () => {
       window.clearInterval(dashboardInterval)
       window.clearInterval(authInterval)
+      window.clearInterval(cloudStatusInterval)
     }
   }, [])
 
@@ -238,6 +274,7 @@ export function Dashboard() {
           </p>
           <p className="muted">
             Status:{' '}
+            {cloudSpotifyStatusLoading ? 'Checking... ' : ''}
             {cloudSpotify?.connected
               ? `Connected${cloudSpotify?.access_token_expires_at ? `, token refresh active` : ''}`
               : 'Not connected'}
@@ -266,6 +303,7 @@ export function Dashboard() {
                     ? ', last run ok'
                     : ', last run failed'
                   : ''}
+              {cloudSpotify.manual_run_active ? ', manual run active' : ''}
             </p>
           )}
           {cloudSpotify && (
@@ -285,8 +323,12 @@ export function Dashboard() {
           <div className="row-actions">
             <button
               onClick={() => {
-                setCloudSpotifyLoading(true)
-                void cloudSpotifyAuthStart()
+                setCloudSpotifyConnectLoading(true)
+                void withTimeout(
+                  cloudSpotifyAuthStart(),
+                  12000,
+                  'Cloud Spotify auth start timed out. This is often a temporary 524.',
+                )
                   .then((payload) => {
                     window.sessionStorage.setItem(CLOUD_SPOTIFY_SESSION_KEY, payload.session_id)
                     window.location.href = payload.authorize_url
@@ -294,36 +336,35 @@ export function Dashboard() {
                   .catch((error: unknown) => {
                     const message = error instanceof Error ? error.message : 'Cloud Spotify start failed.'
                     setCloudNote(explainCloudError(message))
-                    setCloudSpotifyLoading(false)
+                    setCloudSpotifyConnectLoading(false)
                   })
               }}
-              disabled={cloudSpotifyLoading}
+              disabled={cloudSpotifyConnectLoading}
             >
-              {cloudSpotifyLoading ? 'Starting...' : 'Connect Spotify on Server'}
+              {cloudSpotifyConnectLoading ? 'Starting...' : 'Connect Spotify on Server'}
             </button>
             <button
               className="button-secondary"
               onClick={() => {
-                setCloudSpotifyLoading(true)
-                void runCloudSpotifyAutomationNow()
+                setCloudAutomationLoading(true)
+                void withTimeout(
+                  runCloudSpotifyAutomationNow(),
+                  8000,
+                  'Automation trigger timed out. The run may still have started in background.',
+                )
                   .then((result) => {
-                    setCloudNote(
-                      `Server automation run: selected ${result.generated.selected_count}, playlists updated.`
-                    )
-                    return cloudSpotifyStatus()
-                  })
-                  .then((statusPayload) => {
-                    setCloudSpotify(statusPayload)
+                    setCloudNote(result.message)
+                    return refreshCloudSpotifyStatus()
                   })
                   .catch((error: unknown) => {
                     const message = error instanceof Error ? error.message : 'Server automation failed.'
                     setCloudNote(explainCloudError(message))
                   })
-                  .finally(() => setCloudSpotifyLoading(false))
+                  .finally(() => setCloudAutomationLoading(false))
               }}
-              disabled={cloudSpotifyLoading || !cloudSpotify?.connected}
+              disabled={cloudAutomationLoading || !cloudSpotify?.connected}
             >
-              Run Server Automation Now
+              {cloudAutomationLoading ? 'Starting run...' : 'Run Server Automation Now'}
             </button>
           </div>
         </section>

@@ -205,6 +205,8 @@ class AftertasteService:
         self._cloud_spotify_clients: dict[str, SpotifyClient] = {}
         self._cloud_pollers: dict[str, PlaybackPoller] = {}
         self._cloud_automation_state: dict[str, dict[str, Any]] = {}
+        self._cloud_manual_run_threads: dict[str, threading.Thread] = {}
+        self._cloud_auth_probe_cache: dict[str, dict[str, Any]] = {}
         self._automation_stop = threading.Event()
         self._automation_thread: threading.Thread | None = None
 
@@ -443,16 +445,41 @@ class AftertasteService:
         client = self._cloud_spotify_client_for_user(user_id)
         poller = self._cloud_poller_for_user(user_id)
         token_store = self._cloud_token_stores.get(user_id)
+        manual_thread = self._cloud_manual_run_threads.get(user_id)
         automation_state = self._cloud_automation_state.get(user_id) or {}
+        now = datetime.now(tz=timezone.utc)
+        cached_probe = self._cloud_auth_probe_cache.get(user_id) or {}
+        cached_at = cached_probe.get("checked_at")
+
         auth_error: str | None = None
         authorized = client.is_authorized()
 
-        if authorized:
+        should_probe = True
+        if isinstance(cached_at, datetime):
+            age = (now - cached_at).total_seconds()
+            if age < 120:
+                should_probe = False
+                authorized = bool(cached_probe.get("authorized") or False)
+                auth_error = cached_probe.get("auth_error")
+
+        if should_probe and authorized:
             try:
                 client.get_me()
+                auth_error = None
             except Exception as exc:
                 authorized = False
                 auth_error = str(exc)
+            self._cloud_auth_probe_cache[user_id] = {
+                "checked_at": now,
+                "authorized": authorized,
+                "auth_error": auth_error,
+            }
+        elif should_probe:
+            self._cloud_auth_probe_cache[user_id] = {
+                "checked_at": now,
+                "authorized": False,
+                "auth_error": None,
+            }
         expires_at = (
             client.access_token_expires_at.isoformat()
             if client.access_token_expires_at
@@ -485,6 +512,7 @@ class AftertasteService:
             "automation_last_run_at": automation_state.get("last_run_at"),
             "automation_last_ok": bool(automation_state.get("last_ok") or False),
             "automation_last_error": automation_state.get("last_error"),
+            "manual_run_active": bool(manual_thread and manual_thread.is_alive()),
         }
 
     def cloud_spotify_now_playing(self, user_id: str) -> dict[str, Any] | None:
@@ -509,11 +537,67 @@ class AftertasteService:
         except Exception:
             return None
 
+    def _dashboard_stats_only(self) -> dict[str, Any]:
+        likely_skips = self.db.query_one(
+            """
+      SELECT COUNT(*) AS c
+      FROM play_events
+      WHERE ended_reason = 'skip_early'
+        AND date(started_at) = date('now')
+      """
+        )
+        completions = self.db.query_one(
+            """
+      SELECT COUNT(*) AS c
+      FROM play_events
+      WHERE ended_reason = 'completed'
+        AND date(started_at) = date('now')
+      """
+        )
+
+        top_negative_artists = self.db.query_all(
+            """
+      SELECT a.artist_id, a.name, COUNT(*) AS skip_count
+      FROM play_events pe
+      JOIN track_artists ta ON ta.track_id = pe.track_id
+      JOIN artists a ON a.artist_id = ta.artist_id
+      WHERE pe.ended_reason = 'skip_early'
+        AND pe.started_at >= datetime('now', '-7 day')
+      GROUP BY a.artist_id, a.name
+      ORDER BY skip_count DESC
+      LIMIT 5
+      """
+        )
+
+        top_revived_tracks = self.db.query_all(
+            """
+      SELECT t.track_id, t.name, s.score_revival
+      FROM track_scores s
+      JOIN tracks t ON t.track_id = s.track_id
+      WHERE s.score_revival > 1.5
+      ORDER BY s.score_revival DESC, s.score_total DESC
+      LIMIT 5
+      """
+        )
+
+        next_refresh = datetime.now(tz=timezone.utc).replace(
+            hour=8, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+
+        return {
+            "likely_skip_count_today": int((likely_skips or {"c": 0})["c"]),
+            "completions_today": int((completions or {"c": 0})["c"]),
+            "top_negative_artists": top_negative_artists,
+            "top_revived_tracks": top_revived_tracks,
+            "next_playlist_refresh_time": next_refresh.isoformat(),
+        }
+
     def cloud_dashboard(self, user_id: str) -> dict[str, Any]:
-        payload = self._run_cloud_context(user_id, self.dashboard)
-        payload["poller_running"] = self._cloud_poller_for_user(user_id).running
-        payload["now_playing"] = self.cloud_spotify_now_playing(user_id)
-        return payload
+        stats = self._run_cloud_context(user_id, self._dashboard_stats_only)
+        stats["poller_running"] = self._cloud_poller_for_user(user_id).running
+        stats["now_playing"] = self.cloud_spotify_now_playing(user_id)
+        stats["cloud_sync_enabled"] = True
+        return stats
 
     def cloud_memory_negative_artists(self, user_id: str) -> list[dict[str, Any]]:
         return self._run_cloud_context(user_id, self.memory_negative_artists)
@@ -626,6 +710,7 @@ class AftertasteService:
 
         client = self._cloud_spotify_client_for_user(user_id)
         token_payload = client.exchange_code(code=code, code_verifier=verifier)
+        self._cloud_auth_probe_cache.pop(user_id, None)
         poller = self._cloud_poller_for_user(user_id)
         poller.start()
         return {
@@ -680,6 +765,40 @@ class AftertasteService:
                 "selected_count": int(generated.get("selected_count") or 0),
             },
             "playlists": generated.get("playlists") or {},
+        }
+
+    def trigger_cloud_master_now(self, user_id: str) -> dict[str, Any]:
+        with self._tenant_lock:
+            existing = self._cloud_manual_run_threads.get(user_id)
+            if existing is not None and existing.is_alive():
+                return {
+                    "ok": True,
+                    "started": False,
+                    "running": True,
+                    "message": "Automation run already in progress.",
+                }
+
+            def _runner() -> None:
+                try:
+                    self.run_cloud_master_once(user_id)
+                except Exception as exc:
+                    self._mark_cloud_automation_result(
+                        user_id, ok=False, error=str(exc)
+                    )
+
+            thread = threading.Thread(
+                target=_runner,
+                name=f"aftertaste-cloud-run-{user_id}",
+                daemon=True,
+            )
+            self._cloud_manual_run_threads[user_id] = thread
+            thread.start()
+
+        return {
+            "ok": True,
+            "started": True,
+            "running": True,
+            "message": "Automation run started in background.",
         }
 
     def _automation_loop(self) -> None:
@@ -1939,4 +2058,6 @@ class AftertasteService:
             self._cloud_token_stores.clear()
             self._cloud_pkce_owner.clear()
             self._cloud_automation_state.clear()
+            self._cloud_manual_run_threads.clear()
+            self._cloud_auth_probe_cache.clear()
         self.db.close()

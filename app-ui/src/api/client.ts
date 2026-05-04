@@ -153,6 +153,7 @@ export function cloudSpotifyStatus() {
     automation_last_run_at: string | null
     automation_last_ok: boolean
     automation_last_error: string | null
+    manual_run_active: boolean
   }>('/cloud/spotify/status')
 }
 
@@ -177,9 +178,9 @@ export function runCloudSpotifyAutomationNow() {
   return request<{
     ok: boolean
     user_id: string
-    sync: Record<string, number>
-    generated: { candidate_count: number; selected_count: number }
-    playlists: Record<string, string>
+    started: boolean
+    running: boolean
+    message: string
   }>('/cloud/spotify/automation/run', {
     method: 'POST',
   })
