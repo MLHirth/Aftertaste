@@ -543,7 +543,7 @@ class AftertasteService:
             auth_error: str | None = None
             if authorized:
                 try:
-                    client.get_me()
+                    client.probe_me(timeout_seconds=3)
                 except Exception as exc:
                     authorized = False
                     auth_error = str(exc)

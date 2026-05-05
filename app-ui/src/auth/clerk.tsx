@@ -86,8 +86,8 @@ function ClerkTokenBridge({ onReady }: { onReady: () => void }) {
       async () =>
         (await getToken(
           clerkJwtTemplate
-            ? { template: clerkJwtTemplate, skipCache: true }
-            : { skipCache: true },
+            ? { template: clerkJwtTemplate }
+            : undefined,
         )) ?? null,
     )
     onReady()

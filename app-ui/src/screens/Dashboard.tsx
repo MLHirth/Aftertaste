@@ -101,7 +101,7 @@ export function Dashboard() {
       const statusPayload = await withTimeout(
         cloudSpotifyStatus(),
         12000,
-        'Cloud Spotify status timed out. This is often a temporary 524 from the server.',
+        'Cloud Spotify status timed out before the server returned token state.',
       )
       setCloudSpotify(statusPayload)
     } catch (error: unknown) {
@@ -348,7 +348,7 @@ export function Dashboard() {
                 void withTimeout(
                   cloudSpotifyAuthStart(),
                   12000,
-                  'Cloud Spotify auth start timed out. This is often a temporary 524.',
+                  'Cloud Spotify auth start timed out before the server returned an OAuth URL.',
                 )
                   .then((payload) => {
                     window.sessionStorage.setItem(CLOUD_SPOTIFY_SESSION_KEY, payload.session_id)

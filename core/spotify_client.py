@@ -73,7 +73,7 @@ class SpotifyClient:
             self.refresh_token = refresh
             self.token_store.save_refresh_token(refresh)
 
-    def refresh_access_token(self) -> None:
+    def refresh_access_token(self, timeout_seconds: float = 20) -> None:
         client_id = self._require_client_id()
         if not self.refresh_token:
             raise RuntimeError("No refresh token found. Login again.")
@@ -83,7 +83,7 @@ class SpotifyClient:
             "refresh_token": self.refresh_token,
             "client_id": client_id,
         }
-        response = requests.post(self.AUTH_BASE, data=payload, timeout=20)
+        response = requests.post(self.AUTH_BASE, data=payload, timeout=timeout_seconds)
         response.raise_for_status()
         data = response.json()
         if "refresh_token" not in data:
@@ -185,6 +185,37 @@ class SpotifyClient:
         if isinstance(country, str) and country:
             self._user_market = country
         return me
+
+    def probe_me(self, timeout_seconds: float = 3) -> dict[str, Any]:
+        with self._lock:
+            if not self._access_token_valid():
+                self.refresh_access_token(timeout_seconds=timeout_seconds)
+
+            if not self.access_token:
+                raise RuntimeError("No valid access token available.")
+
+            headers: dict[str, str] = {"Authorization": f"Bearer {self.access_token}"}
+            response = requests.get(
+                f"{self.API_BASE}/me",
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+
+            if response.status_code == 401:
+                self.refresh_access_token(timeout_seconds=timeout_seconds)
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.get(
+                    f"{self.API_BASE}/me",
+                    headers=headers,
+                    timeout=timeout_seconds,
+                )
+
+            response.raise_for_status()
+            me = response.json() if response.content else {}
+            country = me.get("country")
+            if isinstance(country, str) and country:
+                self._user_market = country
+            return me
 
     def get_currently_playing(self) -> dict[str, Any] | None:
         return self.request("GET", "/me/player/currently-playing")
