@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import contextvars
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -182,6 +183,12 @@ class EncryptedTenantTokenStore:
 class AftertasteService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._db_context: contextvars.ContextVar[Database | None] = (
+            contextvars.ContextVar("aftertaste_db", default=None)
+        )
+        self._spotify_context: contextvars.ContextVar[SpotifyClient | None] = (
+            contextvars.ContextVar("aftertaste_spotify", default=None)
+        )
         self.db = Database(settings.db_path)
         self.migrations_dir = Path(__file__).resolve().parent.parent / "migrations"
         self.db.migrate(self.migrations_dir)
@@ -196,7 +203,6 @@ class AftertasteService:
         self._last_recent_reconcile_at: datetime | None = None
         self._last_cloud_sync_at: datetime | None = None
         self._tenant_lock = threading.RLock()
-        self._context_lock = threading.RLock()
         self._tenant_dbs: dict[str, Database] = {}
         self._tenant_engines: dict[str, CloudSyncEngine] = {}
         self._cloud_pkce = PKCEManager()
@@ -206,6 +212,7 @@ class AftertasteService:
         self._cloud_pollers: dict[str, PlaybackPoller] = {}
         self._cloud_automation_state: dict[str, dict[str, Any]] = {}
         self._cloud_manual_run_threads: dict[str, threading.Thread] = {}
+        self._cloud_run_locks: dict[str, threading.Lock] = {}
         self._cloud_auth_probe_cache: dict[str, dict[str, Any]] = {}
         self._cloud_auth_probe_threads: dict[str, threading.Thread] = {}
         self._automation_stop = threading.Event()
@@ -223,6 +230,22 @@ class AftertasteService:
                 daemon=True,
             )
             self._automation_thread.start()
+
+    @property
+    def db(self) -> Database:
+        return self._db_context.get() or self._default_db
+
+    @db.setter
+    def db(self, value: Database) -> None:
+        self._default_db = value
+
+    @property
+    def spotify(self) -> SpotifyClient:
+        return self._spotify_context.get() or self._default_spotify
+
+    @spotify.setter
+    def spotify(self, value: SpotifyClient) -> None:
+        self._default_spotify = value
 
     def require_configured(self) -> None:
         if not self.spotify.is_configured():
@@ -408,19 +431,28 @@ class AftertasteService:
             self._cloud_pollers[normalized_user] = poller
             return poller
 
+    def _cloud_run_lock_for_user(self, user_id: str) -> threading.Lock:
+        normalized_user = user_id.strip()
+        if not normalized_user:
+            raise RuntimeError("Cloud sync user id cannot be empty.")
+
+        with self._tenant_lock:
+            lock = self._cloud_run_locks.get(normalized_user)
+            if lock is None:
+                lock = threading.Lock()
+                self._cloud_run_locks[normalized_user] = lock
+            return lock
+
     def _run_cloud_context(self, user_id: str, operation: Callable[[], T]) -> T:
         tenant_db = self.cloud_sync_engine_for_user(user_id).db
         spotify = self._cloud_spotify_client_for_user(user_id)
-        with self._context_lock:
-            original_db = self.db
-            original_spotify = self.spotify
-            try:
-                self.db = tenant_db
-                self.spotify = spotify
-                return operation()
-            finally:
-                self.db = original_db
-                self.spotify = original_spotify
+        db_token = self._db_context.set(tenant_db)
+        spotify_token = self._spotify_context.set(spotify)
+        try:
+            return operation()
+        finally:
+            self._spotify_context.reset(spotify_token)
+            self._db_context.reset(db_token)
 
     def _mark_cloud_automation_result(
         self,
@@ -769,6 +801,21 @@ class AftertasteService:
         }
 
     def run_cloud_master_once(self, user_id: str) -> dict[str, Any]:
+        run_lock = self._cloud_run_lock_for_user(user_id)
+        if not run_lock.acquire(blocking=False):
+            self._mark_cloud_automation_result(
+                user_id,
+                ok=False,
+                error="Cloud Spotify automation is already running.",
+            )
+            raise RuntimeError("Cloud Spotify automation is already running.")
+
+        try:
+            return self._run_cloud_master_once_locked(user_id)
+        finally:
+            run_lock.release()
+
+    def _run_cloud_master_once_locked(self, user_id: str) -> dict[str, Any]:
         spotify = self._cloud_spotify_client_for_user(user_id)
         if not spotify.is_authorized():
             self._mark_cloud_automation_result(
@@ -816,6 +863,15 @@ class AftertasteService:
 
     def trigger_cloud_master_now(self, user_id: str) -> dict[str, Any]:
         with self._tenant_lock:
+            run_lock = self._cloud_run_lock_for_user(user_id)
+            if run_lock.locked():
+                return {
+                    "ok": True,
+                    "started": False,
+                    "running": True,
+                    "message": "Automation run already in progress.",
+                }
+
             existing = self._cloud_manual_run_threads.get(user_id)
             if existing is not None and existing.is_alive():
                 return {
@@ -2106,6 +2162,7 @@ class AftertasteService:
             self._cloud_pkce_owner.clear()
             self._cloud_automation_state.clear()
             self._cloud_manual_run_threads.clear()
+            self._cloud_run_locks.clear()
             self._cloud_auth_probe_cache.clear()
             self._cloud_auth_probe_threads.clear()
         self.db.close()
