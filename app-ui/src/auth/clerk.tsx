@@ -1,13 +1,17 @@
-import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 
 import { ClerkLoaded, ClerkLoading, ClerkProvider, SignIn, SignedIn, UserButton, useAuth } from '@clerk/clerk-react'
 
-import { setAuthTokenProvider } from '../api/client'
+import { setAuthRequired, setAuthTokenProvider } from '../api/client'
 import { useAuthStore } from '../state/authStore'
+import {
+  clerkJwtTemplate,
+  clerkPublishableKey,
+  cloudSignInBaseUrl,
+  isClerkEnabled,
+} from './config'
 
-const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined
-const clerkJwtTemplate = import.meta.env.VITE_CLERK_JWT_TEMPLATE as string | undefined
-const cloudSignInBaseUrl = import.meta.env.VITE_CLOUD_SIGNIN_BASE_URL as string | undefined
+setAuthRequired(isClerkEnabled())
 
 const clerkAppearance = {
   variables: {
@@ -52,23 +56,29 @@ async function openExternal(url: string) {
   }
 }
 
-export function isClerkEnabled() {
-  return Boolean(publishableKey)
-}
-
 export function MaybeClerkProvider({ children }: { children: ReactNode }) {
-  if (!publishableKey) {
+  if (!clerkPublishableKey) {
     return <>{children}</>
   }
 
   return (
-    <ClerkProvider publishableKey={publishableKey} appearance={clerkAppearance}>
+    <ClerkProvider publishableKey={clerkPublishableKey} appearance={clerkAppearance}>
       {children}
     </ClerkProvider>
   )
 }
 
-function ClerkTokenBridge() {
+function LoadingAccount() {
+  return (
+    <main className="screen">
+      <section className="panel">
+        <h3>Loading account...</h3>
+      </section>
+    </main>
+  )
+}
+
+function ClerkTokenBridge({ onReady }: { onReady: () => void }) {
   const { getToken } = useAuth()
 
   useEffect(() => {
@@ -80,10 +90,11 @@ function ClerkTokenBridge() {
             : { skipCache: true },
         )) ?? null,
     )
+    onReady()
     return () => {
       setAuthTokenProvider(null)
     }
-  }, [getToken])
+  }, [getToken, onReady])
 
   return null
 }
@@ -154,18 +165,14 @@ function DesktopSignInOutOfApp() {
 }
 
 export function AuthGate({ children }: { children: ReactNode }) {
-  if (!publishableKey) {
+  if (!clerkPublishableKey) {
     return <>{children}</>
   }
 
   return (
     <>
       <ClerkLoading>
-        <main className="screen">
-          <section className="panel">
-            <h3>Loading account...</h3>
-          </section>
-        </main>
+        <LoadingAccount />
       </ClerkLoading>
       <ClerkLoaded>
         <AuthGateLoaded>{children}</AuthGateLoaded>
@@ -180,12 +187,7 @@ function AuthGateLoaded({ children }: { children: ReactNode }) {
   const desktopCloudSession = isTauriDesktop() && hasCloudBearerToken
 
   if (isSignedIn) {
-    return (
-      <>
-        <ClerkTokenBridge />
-        {children}
-      </>
-    )
+    return <SignedInAuthGate>{children}</SignedInAuthGate>
   }
 
   if (desktopCloudSession) {
@@ -206,8 +208,20 @@ function AuthGateLoaded({ children }: { children: ReactNode }) {
   )
 }
 
+function SignedInAuthGate({ children }: { children: ReactNode }) {
+  const [tokenBridgeReady, setTokenBridgeReady] = useState(false)
+  const markTokenBridgeReady = useCallback(() => setTokenBridgeReady(true), [])
+
+  return (
+    <>
+      <ClerkTokenBridge onReady={markTokenBridgeReady} />
+      {tokenBridgeReady ? children : <LoadingAccount />}
+    </>
+  )
+}
+
 export function AccountControl() {
-  if (!publishableKey) {
+  if (!clerkPublishableKey) {
     return null
   }
 
@@ -241,25 +255,32 @@ function SessionStatusWithClerk() {
   const cloudIdentity = useAuthStore((state) => state.cloudIdentity)
   const spotifyLabel = isTauriDesktop()
     ? `Spotify: ${status?.authorized ? 'connected' : 'not connected'}`
-    : `Spotify: server-managed ${status?.cloud_spotify_connected ? 'connected' : 'not connected'}`
+    : `Spotify token: ${status?.spotify_refresh_token_present ? 'present' : 'missing'}`
+  const probeLabel =
+    status?.spotify_live_probe_ok === undefined || status?.spotify_live_probe_ok === null
+      ? 'Spotify probe: pending'
+      : `Spotify probe: ${status.spotify_live_probe_ok ? 'ok' : 'failed'}`
+  const cloudApiLabel = `Cloud API: ${status?.cloud_api_auth_ok ? 'JWT ok' : 'pending'}`
 
   let cloudLabel = 'Cloud: not connected'
   if (isSignedIn) {
-    cloudLabel = `Cloud: Clerk ${userId ?? 'signed in'}`
+    cloudLabel = `Clerk: ${userId ?? 'signed in'}`
   } else if (hasCloudBearerToken) {
-    cloudLabel = `Cloud: handoff ${cloudIdentity ?? 'token loaded'}`
+    cloudLabel = `Handoff: ${cloudIdentity ?? 'token loaded'}`
   }
 
   return (
     <div className="session-chip">
-      <span className={status?.authorized ? 'ok' : ''}>{spotifyLabel}</span>
       <span className={isSignedIn || hasCloudBearerToken ? 'ok' : ''}>{cloudLabel}</span>
+      <span className={status?.cloud_api_auth_ok ? 'ok' : ''}>{cloudApiLabel}</span>
+      <span className={status?.spotify_refresh_token_present ? 'ok' : ''}>{spotifyLabel}</span>
+      {!isTauriDesktop() && <span className={status?.spotify_live_probe_ok ? 'ok' : ''}>{probeLabel}</span>}
     </div>
   )
 }
 
 export function SessionStatus() {
-  if (!publishableKey) {
+  if (!clerkPublishableKey) {
     return <SessionStatusNoClerk />
   }
   return <SessionStatusWithClerk />

@@ -19,12 +19,11 @@ const links = [
 ]
 
 function App() {
-  const auth = useAuthStore()
+  const initDeepLinkListener = useAuthStore((state) => state.initDeepLinkListener)
 
   useEffect(() => {
-    void auth.initDeepLinkListener()
-    void auth.refreshStatus()
-  }, [])
+    void initDeepLinkListener()
+  }, [initDeepLinkListener])
 
   return (
     <HashRouter>
@@ -52,18 +51,30 @@ function App() {
         </header>
 
         <AuthGate>
-          <Routes>
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/today" element={<TodayMix />} />
-            <Route path="/memory" element={<Memory />} />
-            <Route path="/rules" element={<Rules />} />
-            <Route path="/sources" element={<Sources />} />
-            <Route path="/desktop-auth" element={<DesktopAuthBridge />} />
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
-          </Routes>
+          <AppRoutes />
         </AuthGate>
       </div>
     </HashRouter>
+  )
+}
+
+function AppRoutes() {
+  const refreshStatus = useAuthStore((state) => state.refreshStatus)
+
+  useEffect(() => {
+    void refreshStatus()
+  }, [refreshStatus])
+
+  return (
+    <Routes>
+      <Route path="/dashboard" element={<Dashboard />} />
+      <Route path="/today" element={<TodayMix />} />
+      <Route path="/memory" element={<Memory />} />
+      <Route path="/rules" element={<Rules />} />
+      <Route path="/sources" element={<Sources />} />
+      <Route path="/desktop-auth" element={<DesktopAuthBridge />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
   )
 }
 

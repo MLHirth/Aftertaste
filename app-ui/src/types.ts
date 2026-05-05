@@ -7,7 +7,11 @@ export type ConfigStatus = {
   cloud_api_base_url?: string | null
   server_master_enabled?: boolean
   spotify_mode?: 'desktop' | 'server_managed'
+  cloud_api_auth_ok?: boolean
   cloud_spotify_connected?: boolean
+  spotify_refresh_token_present?: boolean
+  spotify_live_probe_ok?: boolean | null
+  automation_scheduler_running?: boolean
 }
 
 export type DashboardData = {

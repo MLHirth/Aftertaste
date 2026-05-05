@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { isClerkEnabled } from '../auth/clerk'
+import { isClerkEnabled } from '../auth/config'
 import {
   cloudSpotifyAuthExchange,
   cloudSpotifyAuthStart,
@@ -56,6 +56,11 @@ type CloudSpotifyState = {
   connected: boolean
   authorized: boolean
   has_refresh_token: boolean
+  cloud_api_auth_ok?: boolean
+  spotify_refresh_token_present?: boolean
+  spotify_live_probe_ok?: boolean | null
+  spotify_live_probe_checked_at?: string | null
+  spotify_live_probe_pending?: boolean
   access_token_expires_at: string | null
   auth_error: string | null
   token_storage_mode: string
@@ -273,20 +278,36 @@ export function Dashboard() {
             even while your desktop app is closed.
           </p>
           <p className="muted">
-            Status:{' '}
-            {cloudSpotifyStatusLoading ? 'Checking... ' : ''}
-            {cloudSpotify?.connected
-              ? `Connected${cloudSpotify?.access_token_expires_at ? `, token refresh active` : ''}`
-              : 'Not connected'}
-            {cloudSpotify?.connected
-              ? cloudSpotify.poller_running
-                ? ', playback monitor running'
-                : ', playback monitor idle'
-              : ''}
-            {cloudSpotify?.server_master_enabled
-              ? `, server auto-run every ${cloudSpotify.server_master_interval_seconds}s`
-              : ', server auto-run is disabled'}
+            Cloud API:{' '}
+            {cloudSpotifyStatusLoading ? 'checking...' : cloudSpotify?.cloud_api_auth_ok ? 'JWT ok' : 'not checked'}
           </p>
+          {cloudSpotify && (
+            <p className="muted">
+              Spotify token:{' '}
+              {(cloudSpotify.spotify_refresh_token_present ?? cloudSpotify.has_refresh_token)
+                ? `refresh token present${cloudSpotify.access_token_expires_at ? ', access token cached' : ''}`
+                : 'not connected'}
+              {cloudSpotify.spotify_live_probe_pending ? ', live probe pending' : ''}
+              {cloudSpotify.spotify_live_probe_ok === true ? ', live probe ok' : ''}
+              {cloudSpotify.spotify_live_probe_ok === false ? ', live probe failed' : ''}
+              {cloudSpotify.spotify_live_probe_checked_at
+                ? `, checked ${new Date(cloudSpotify.spotify_live_probe_checked_at).toLocaleString()}`
+                : ''}
+            </p>
+          )}
+          {cloudSpotify && (
+            <p className="muted">
+              Playback monitor:{' '}
+              {cloudSpotify.connected
+                ? cloudSpotify.poller_running
+                  ? 'running'
+                  : 'idle'
+                : 'waiting for Spotify'}
+              {cloudSpotify.server_master_enabled
+                ? `, server auto-run every ${cloudSpotify.server_master_interval_seconds}s`
+                : ', server auto-run disabled'}
+            </p>
+          )}
           {cloudSpotify && (
             <p className="muted">
               Automation:{' '}

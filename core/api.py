@@ -138,9 +138,10 @@ def _cloud_principal(
     return _authenticate_cloud_credentials(credentials)
 
 
-def _cloud_principal_optional(
+def _cloud_principal_when_clerk_enabled(
     credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
 ) -> CloudPrincipal | None:
+    """Require a cloud principal in Clerk mode; preserve local desktop mode otherwise."""
     if not settings.clerk_auth_enabled:
         return None
     return _authenticate_cloud_credentials(credentials)
@@ -165,7 +166,7 @@ def health() -> dict[str, str]:
 
 @app.get("/config/status")
 def config_status(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, Any]:
     status = service().auth_status()
     if principal is None:
@@ -176,8 +177,16 @@ def config_status(
     status["authorized"] = bool(cloud.get("connected"))
     status["db_path"] = f"cloud-tenant:{principal.user_id}"
     status["spotify_mode"] = "server_managed"
+    status["cloud_api_auth_ok"] = True
     status["cloud_spotify_connected"] = bool(cloud.get("connected"))
+    status["spotify_refresh_token_present"] = bool(
+        cloud.get("spotify_refresh_token_present")
+    )
+    status["spotify_live_probe_ok"] = cloud.get("spotify_live_probe_ok")
     status["server_master_enabled"] = bool(cloud.get("server_master_enabled"))
+    status["automation_scheduler_running"] = bool(
+        cloud.get("automation_thread_running")
+    )
     return status
 
 
@@ -235,7 +244,7 @@ def sync_recent() -> dict[str, int]:
 
 @app.post("/sync/all")
 def sync_all(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, int]:
     try:
         if principal is not None:
@@ -269,7 +278,7 @@ def sync_cloud_status(
 
 @app.post("/poller/start")
 def poller_start(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, bool]:
     try:
         if principal is not None:
@@ -281,7 +290,7 @@ def poller_start(
 
 @app.post("/poller/stop")
 def poller_stop(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, bool]:
     try:
         if principal is not None:
@@ -294,7 +303,7 @@ def poller_stop(
 @app.post("/generate/today")
 def generate_today(
     body: GenerateBody,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, Any]:
     try:
         if principal is not None:
@@ -310,7 +319,7 @@ def generate_today(
 @app.post("/generate/vibe-revival")
 def generate_vibe_revival(
     body: GenerateBody,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, Any]:
     try:
         if principal is not None:
@@ -326,7 +335,7 @@ def generate_vibe_revival(
 @app.post("/queue/top-up")
 def queue_top_up(
     body: QueueBody,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, int]:
     try:
         if principal is not None:
@@ -341,7 +350,7 @@ def queue_top_up(
 
 @app.get("/dashboard")
 def dashboard(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, Any]:
     if principal is not None:
         return _dashboard_for_cloud_user(principal.user_id)
@@ -351,7 +360,7 @@ def dashboard(
 @app.get("/today-mix")
 def today_mix(
     limit: int = 40,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> list[dict[str, Any]]:
     if principal is not None:
         return service().cloud_get_today_mix(principal.user_id, limit=limit)
@@ -360,7 +369,7 @@ def today_mix(
 
 @app.get("/memory/negative-artists")
 def memory_negative_artists(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> list[dict[str, Any]]:
     if principal is not None:
         return _memory_negative_artists_for_cloud_user(principal.user_id)
@@ -370,7 +379,7 @@ def memory_negative_artists(
 @app.get("/memory/tracks")
 def memory_tracks(
     limit: int = 120,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> list[dict[str, Any]]:
     if principal is not None:
         return _memory_tracks_for_cloud_user(principal.user_id, limit)
@@ -379,7 +388,7 @@ def memory_tracks(
 
 @app.get("/rules")
 def rules(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, float]:
     if principal is not None:
         return service().cloud_get_rules(principal.user_id)
@@ -389,7 +398,7 @@ def rules(
 @app.put("/rules")
 def save_rules(
     body: RulesBody,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, float]:
     if principal is not None:
         return service().cloud_save_rules(principal.user_id, body.updates)
@@ -398,7 +407,7 @@ def save_rules(
 
 @app.get("/sources")
 def sources(
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> list[dict[str, Any]]:
     if principal is not None:
         return service().cloud_list_sources(principal.user_id)
@@ -409,7 +418,7 @@ def sources(
 def save_source(
     playlist_id: str,
     body: SourceBody,
-    principal: CloudPrincipal | None = Depends(_cloud_principal_optional),
+    principal: CloudPrincipal | None = Depends(_cloud_principal_when_clerk_enabled),
 ) -> dict[str, bool]:
     if principal is not None:
         service().cloud_update_source(
@@ -461,6 +470,7 @@ def cloud_spotify_status(
     try:
         payload = service().cloud_spotify_status(principal.user_id)
         payload["user_id"] = principal.user_id
+        payload["cloud_api_auth_ok"] = True
         return payload
     except Exception as exc:
         raise _as_http_error(exc) from exc

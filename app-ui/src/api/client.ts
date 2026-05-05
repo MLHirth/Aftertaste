@@ -13,9 +13,32 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8765'
 type TokenProvider = (() => Promise<string | null>) | null
 
 let authTokenProvider: TokenProvider = null
+let authRequired = false
+const authProviderWaiters = new Set<() => void>()
+
+const AUTH_PROVIDER_WAIT_MS = 2000
+
+const publicWhenAuthRequired = new Set(['/health', '/auth/start', '/auth/exchange'])
+
+function notifyAuthProviderWaiters() {
+  for (const resolve of authProviderWaiters) {
+    resolve()
+  }
+  authProviderWaiters.clear()
+}
+
+export function setAuthRequired(flag: boolean) {
+  authRequired = flag
+  if (!flag) {
+    notifyAuthProviderWaiters()
+  }
+}
 
 export function setAuthTokenProvider(provider: TokenProvider) {
   authTokenProvider = provider
+  if (provider) {
+    notifyAuthProviderWaiters()
+  }
 }
 
 function isLocalApiBase() {
@@ -28,6 +51,9 @@ function isLocalApiBase() {
 }
 
 function shouldAttachAuth(path: string) {
+  if (authRequired && !publicWhenAuthRequired.has(path)) {
+    return true
+  }
   if (!isLocalApiBase()) {
     return true
   }
@@ -38,16 +64,46 @@ function shouldAttachAuth(path: string) {
   )
 }
 
+async function waitForAuthTokenProvider() {
+  if (authTokenProvider || !authRequired) {
+    return
+  }
+
+  await new Promise<void>((resolve) => {
+    let timeout: number | null = null
+    const waiter = () => {
+      if (timeout !== null) {
+        window.clearTimeout(timeout)
+      }
+      resolve()
+    }
+
+    timeout = window.setTimeout(() => {
+      authProviderWaiters.delete(waiter)
+      resolve()
+    }, AUTH_PROVIDER_WAIT_MS)
+
+    authProviderWaiters.add(waiter)
+  })
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const dynamicHeaders: Record<string, string> = {}
-  if (authTokenProvider && shouldAttachAuth(path)) {
+  const needsAuth = shouldAttachAuth(path)
+  if (needsAuth) {
+    await waitForAuthTokenProvider()
+
+    let token: string | null = null
     try {
-      const token = await authTokenProvider()
-      if (token) {
-        dynamicHeaders.Authorization = `Bearer ${token}`
-      }
+      token = authTokenProvider ? await authTokenProvider() : null
     } catch {
-      // no-op
+      token = null
+    }
+
+    if (token) {
+      dynamicHeaders.Authorization = `Bearer ${token}`
+    } else if (authRequired) {
+      throw new Error('Cloud auth token not ready.')
     }
   }
 
@@ -140,6 +196,11 @@ export function cloudSpotifyStatus() {
     connected: boolean
     authorized: boolean
     has_refresh_token: boolean
+    cloud_api_auth_ok?: boolean
+    spotify_refresh_token_present?: boolean
+    spotify_live_probe_ok?: boolean | null
+    spotify_live_probe_checked_at?: string | null
+    spotify_live_probe_pending?: boolean
     access_token_expires_at: string | null
     auth_error: string | null
     token_storage_mode: string

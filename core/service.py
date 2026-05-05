@@ -207,6 +207,7 @@ class AftertasteService:
         self._cloud_automation_state: dict[str, dict[str, Any]] = {}
         self._cloud_manual_run_threads: dict[str, threading.Thread] = {}
         self._cloud_auth_probe_cache: dict[str, dict[str, Any]] = {}
+        self._cloud_auth_probe_threads: dict[str, threading.Thread] = {}
         self._automation_stop = threading.Event()
         self._automation_thread: threading.Thread | None = None
 
@@ -452,43 +453,41 @@ class AftertasteService:
         cached_at = cached_probe.get("checked_at")
 
         auth_error: str | None = None
-        authorized = client.is_authorized()
+        connected = bool(client.refresh_token)
+        locally_authorized = client.is_authorized()
+        live_probe_ok: bool | None = None
+        live_probe_checked_at: str | None = None
 
-        should_probe = True
         if isinstance(cached_at, datetime):
-            age = (now - cached_at).total_seconds()
-            if age < 120:
-                should_probe = False
-                authorized = bool(cached_probe.get("authorized") or False)
-                auth_error = cached_probe.get("auth_error")
+            live_probe_checked_at = cached_at.isoformat()
+            live_probe_ok = bool(cached_probe.get("authorized") or False)
+            auth_error = cached_probe.get("auth_error")
 
-        if should_probe and authorized:
-            try:
-                client.get_me()
-                auth_error = None
-            except Exception as exc:
-                authorized = False
-                auth_error = str(exc)
-            self._cloud_auth_probe_cache[user_id] = {
-                "checked_at": now,
-                "authorized": authorized,
-                "auth_error": auth_error,
-            }
-        elif should_probe:
-            self._cloud_auth_probe_cache[user_id] = {
-                "checked_at": now,
-                "authorized": False,
-                "auth_error": None,
-            }
+        probe_pending = self._schedule_cloud_auth_probe_if_needed(
+            user_id=user_id,
+            client=client,
+            now=now,
+            cached_at=cached_at if isinstance(cached_at, datetime) else None,
+        )
+
+        if not locally_authorized:
+            authorized = False
+            live_probe_ok = False
+        else:
+            authorized = live_probe_ok if live_probe_ok is not None else locally_authorized
         expires_at = (
             client.access_token_expires_at.isoformat()
             if client.access_token_expires_at
             else None
         )
         return {
-            "connected": bool(client.refresh_token),
+            "connected": connected,
             "authorized": authorized,
-            "has_refresh_token": bool(client.refresh_token),
+            "has_refresh_token": connected,
+            "spotify_refresh_token_present": connected,
+            "spotify_live_probe_ok": live_probe_ok,
+            "spotify_live_probe_checked_at": live_probe_checked_at,
+            "spotify_live_probe_pending": probe_pending,
             "access_token_expires_at": expires_at,
             "auth_error": auth_error,
             "token_storage_mode": (
@@ -514,6 +513,54 @@ class AftertasteService:
             "automation_last_error": automation_state.get("last_error"),
             "manual_run_active": bool(manual_thread and manual_thread.is_alive()),
         }
+
+    def _schedule_cloud_auth_probe_if_needed(
+        self,
+        *,
+        user_id: str,
+        client: SpotifyClient,
+        now: datetime,
+        cached_at: datetime | None,
+    ) -> bool:
+        if not client.is_authorized():
+            self._cloud_auth_probe_cache[user_id] = {
+                "checked_at": now,
+                "authorized": False,
+                "auth_error": None,
+            }
+            return False
+
+        if cached_at is not None and (now - cached_at).total_seconds() < 120:
+            return False
+
+        existing = self._cloud_auth_probe_threads.get(user_id)
+        if existing and existing.is_alive():
+            return True
+
+        def probe() -> None:
+            checked_at = datetime.now(tz=timezone.utc)
+            authorized = client.is_authorized()
+            auth_error: str | None = None
+            if authorized:
+                try:
+                    client.get_me()
+                except Exception as exc:
+                    authorized = False
+                    auth_error = str(exc)
+            self._cloud_auth_probe_cache[user_id] = {
+                "checked_at": checked_at,
+                "authorized": authorized,
+                "auth_error": auth_error,
+            }
+
+        thread = threading.Thread(
+            target=probe,
+            daemon=True,
+            name=f"aftertaste-cloud-auth-probe-{user_id[:24]}",
+        )
+        self._cloud_auth_probe_threads[user_id] = thread
+        thread.start()
+        return True
 
     def cloud_spotify_now_playing(self, user_id: str) -> dict[str, Any] | None:
         client = self._cloud_spotify_client_for_user(user_id)
@@ -2060,4 +2107,5 @@ class AftertasteService:
             self._cloud_automation_state.clear()
             self._cloud_manual_run_threads.clear()
             self._cloud_auth_probe_cache.clear()
+            self._cloud_auth_probe_threads.clear()
         self.db.close()
